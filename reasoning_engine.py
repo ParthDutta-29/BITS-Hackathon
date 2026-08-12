@@ -433,15 +433,16 @@ def execute_and_format(sql: str, answer_type: str) -> Any:
     conn.close()
 
     if not row or row[0] is None:
-        return 0 if answer_type != "percent" else 0.0
+        return 0 if answer_type != "percent" else "0.00"
 
     raw_val = row[0]
     if answer_type in ["money", "count", "days"]:
         return int(round(float(raw_val)))
     elif answer_type == "percent":
-        return round(float(raw_val), 2)
+        return f"{float(raw_val):.2f}"
     else:
         return int(round(float(raw_val)))
+
 
 
 def answer_question(question: str, answer_type: str) -> Tuple[Any, str]:
