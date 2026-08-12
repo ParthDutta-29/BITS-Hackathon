@@ -2,7 +2,11 @@ import os
 import pandas as pd
 import json
 import re
-import pdfplumber
+
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
 
 # Initialization and Mapping
 index_df = pd.read_csv("document_index.csv")
@@ -16,12 +20,12 @@ extracted_corpus = {}
 def extract_text_from_pdf(filepath):
     text = ""
     try:
-        with pdfplumber.open(filepath) as pdf:
-            for page in pdf.pages:
-                # Extract raw text, preserving page order
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+        doc = fitz.open(filepath)
+        for page in doc:
+            page_text = page.get_text()
+            if page_text:
+                text += page_text + "\n"
+        doc.close()
         return text
     except Exception as e:
         print(f"Error reading {filepath}: {e}")
@@ -47,9 +51,8 @@ def clean_text(raw_text):
     if not raw_text:
         return ""
     # Condense multiple spaces/newlines into a single space
-    cleaned = re.sub(r"\s+", " ", raw_text)
-    # Strip non-ASCII characters and hidden artifacts
-    cleaned = re.sub(r"[^\x00-\x7F]+", " ", cleaned)
+    cleaned = re.sub(r"[ \t\r\f\v]+", " ", raw_text)
+    cleaned = re.sub(r"\n\s*\n", "\n", cleaned)
     return cleaned.strip()
 
 
@@ -82,7 +85,7 @@ def main():
 
     # Export the parsed corpus to a JSON file with UTF-8 encoding
     with open("parsed_corpus.json", "w", encoding="utf-8") as f:
-        json.dump(extracted_corpus, f, indent=4)
+        json.dump(extracted_corpus, f, indent=4, ensure_ascii=False)
 
     print(
         f"Phase 2 Complete! Extracted data saved to parsed_corpus.json ({len(extracted_corpus)} documents)"
@@ -91,3 +94,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

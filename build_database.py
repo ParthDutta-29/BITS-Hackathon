@@ -2,129 +2,72 @@ import os
 import json
 import sqlite3
 import re
+import glob
+import pandas as pd
 from typing import Dict, Any, Optional
+import pymupdf
 
 DB_FILE = "construction_archive.db"
 EXTRACTED_FILE = "extracted_database.json"
 
-from extract_entities import clean_client_name
-
-
-def clean_name(val: Optional[str]) -> Optional[str]:
-    if not val or not isinstance(val, str):
-        return None
-    cleaned = re.sub(r"\s+", " ", val).strip()
-    return cleaned or None
+from extract_entities import clean_client_name, clean_employee_name, normalize_date, normalize_currency
 
 
 def init_db(conn: sqlite3.Connection):
     cursor = conn.cursor()
 
-    # Clients Table
-    cursor.execute(
-        """
-    CREATE TABLE IF NOT EXISTS clients (
-        client_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client_name TEXT UNIQUE NOT NULL
-    );
-    """
-    )
-
-    # Employees Table
-    cursor.execute(
-        """
-    CREATE TABLE IF NOT EXISTS employees (
-        employee_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        employee_name TEXT UNIQUE NOT NULL
-    );
-    """
-    )
-
-    # Projects Table
-    cursor.execute(
-        """
-    CREATE TABLE IF NOT EXISTS projects (
+    cursor.execute("CREATE TABLE IF NOT EXISTS clients (client_id INTEGER PRIMARY KEY AUTOINCREMENT, client_name TEXT UNIQUE NOT NULL);")
+    cursor.execute("CREATE TABLE IF NOT EXISTS employees (employee_id INTEGER PRIMARY KEY AUTOINCREMENT, employee_name TEXT UNIQUE NOT NULL);")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS projects (
         project_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pkg_num INTEGER UNIQUE NOT NULL,
         project_name TEXT UNIQUE NOT NULL,
-        client_id INTEGER,
-        employee_id INTEGER,
+        client_id INTEGER REFERENCES clients(client_id),
+        employee_id INTEGER REFERENCES employees(employee_id),
         contract_value INTEGER,
         completion_date TEXT,
-        category TEXT,
-        FOREIGN KEY(client_id) REFERENCES clients(client_id),
-        FOREIGN KEY(employee_id) REFERENCES employees(employee_id)
-    );
-    """
-    )
-
-    # Certifications Table
-    cursor.execute(
-        """
-    CREATE TABLE IF NOT EXISTS certifications (
+        completion_year INTEGER,
+        category TEXT
+    );""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS certifications (
         cert_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        employee_id INTEGER,
+        employee_id INTEGER REFERENCES employees(employee_id),
         cert_type TEXT,
-        issue_date TEXT,
-        FOREIGN KEY(employee_id) REFERENCES employees(employee_id)
-    );
-    """
-    )
-
-    # Documents Table
-    cursor.execute(
-        """
-    CREATE TABLE IF NOT EXISTS documents (
+        issue_date TEXT
+    );""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS documents (
         doc_id TEXT PRIMARY KEY,
         doc_type TEXT,
-        project_id INTEGER,
-        client_id INTEGER,
-        has_reference_letter INTEGER DEFAULT 0,
-        FOREIGN KEY(project_id) REFERENCES projects(project_id),
-        FOREIGN KEY(client_id) REFERENCES clients(client_id)
-    );
-    """
-    )
+        project_id INTEGER REFERENCES projects(project_id),
+        client_id INTEGER REFERENCES clients(client_id),
+        has_reference_letter INTEGER DEFAULT 0
+    );""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS financial_billing (
+        billing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER REFERENCES clients(client_id),
+        invoiced_value INTEGER,
+        paid_value INTEGER,
+        due_value INTEGER,
+        collection_pct REAL
+    );""")
 
-    # Indexes
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(client_name);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_employees_name ON employees(employee_name);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(project_name);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client_id);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_projects_employee ON projects(employee_id);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_certifications_employee ON certifications(employee_id);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);"
-    )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);"
-    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(client_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_employees_name ON employees(employee_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(project_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_employee ON projects(employee_id);")
 
     conn.commit()
 
 
 def build_database():
     if not os.path.exists(EXTRACTED_FILE):
-        print(
-            f"Error: {EXTRACTED_FILE} not found. Please run extract_entities.py first."
-        )
+        print(f"Error: {EXTRACTED_FILE} not found. Please run extract_entities.py first.")
         return
 
     with open(EXTRACTED_FILE, "r", encoding="utf-8") as f:
         extracted = json.load(f)
 
-    # Remove existing DB file for a clean rebuild
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
 
@@ -132,184 +75,176 @@ def build_database():
     init_db(conn)
     cursor = conn.cursor()
 
-    # Collect and deduplicate Clients and Employees
-    clients_set = set()
-    employees_set = set()
-    projects_dict: Dict[str, Dict[str, Any]] = {}
+    clients_map = {}
+    employees_map = {}
 
-    # Identify projects with reference letters
-    projects_with_ref_letter = set()
-    for doc_id, doc in extracted.items():
-        if doc.get("doc_type") == "reference_letter" or doc.get("has_reference_letter"):
-            p_name = clean_name(doc.get("project_name"))
-            if p_name:
-                projects_with_ref_letter.add(p_name)
+    def get_client_id(c_name):
+        if not c_name:
+            return None
+        c_clean = clean_client_name(c_name)
+        if not c_clean:
+            return None
+        if c_clean not in clients_map:
+            cursor.execute("INSERT INTO clients (client_name) VALUES (?);", (c_clean,))
+            clients_map[c_clean] = cursor.lastrowid
+        return clients_map[c_clean]
 
-    # Process company_completion_certificate documents first for authoritative metadata
-    for doc_id, doc in extracted.items():
-        if doc.get("doc_type") != "company_completion_certificate":
-            continue
-        c_name = clean_client_name(doc.get("client_name"))
-        emp_name = clean_name(doc.get("employee_name"))
-        p_name = clean_name(doc.get("project_name"))
+    def get_emp_id(e_name):
+        if not e_name:
+            return None
+        e_clean = clean_employee_name(e_name)
+        if not e_clean:
+            return None
+        if e_clean not in employees_map:
+            cursor.execute("INSERT INTO employees (employee_name) VALUES (?);", (e_clean,))
+            employees_map[e_clean] = cursor.lastrowid
+        return employees_map[e_clean]
 
-        if c_name:
-            clients_set.add(c_name)
-        if emp_name:
-            employees_set.add(emp_name)
+    # 1. Parse all 155 company completion certificates for authoritative 155 projects
+    ccc_files = sorted(glob.glob("documents/company_completion_certificate/*.pdf"))
+    projects_pkg_map = {}
 
-        if p_name:
-            projects_dict[p_name] = {
-                "client_name": c_name,
-                "employee_name": emp_name,
-                "contract_value": doc.get("contract_value_rupees"),
-                "completion_date": doc.get("completion_date"),
-                "category": doc.get("project_category"),
-            }
+    for f in ccc_files:
+        d = pymupdf.open(f)
+        txt = "\n".join([p.get_text() for p in d])
+        d.close()
 
-    # Process remaining documents without overwriting locked fields
-    for doc_id, doc in extracted.items():
-        if doc.get("doc_type") == "company_completion_certificate":
-            continue
-        c_name = clean_client_name(doc.get("client_name"))
-        emp_name = clean_name(doc.get("employee_name"))
-        p_name = clean_name(doc.get("project_name"))
+        m_pkg = re.search(r"Pkg-(\d+)", txt, re.IGNORECASE)
+        pkg_num = int(m_pkg.group(1)) if m_pkg else None
 
-        if c_name:
-            clients_set.add(c_name)
-        if emp_name:
-            employees_set.add(emp_name)
-
-        if p_name:
-            if p_name not in projects_dict:
-                projects_dict[p_name] = {
-                    "client_name": c_name,
-                    "employee_name": emp_name,
-                    "contract_value": doc.get("contract_value_rupees"),
-                    "completion_date": doc.get("completion_date"),
-                    "category": doc.get("project_category"),
-                }
-            else:
-                if not projects_dict[p_name]["client_name"] and c_name:
-                    projects_dict[p_name]["client_name"] = c_name
-                if not projects_dict[p_name]["employee_name"] and emp_name:
-                    projects_dict[p_name]["employee_name"] = emp_name
-                if doc.get("contract_value_rupees"):
-                    curr_val = projects_dict[p_name]["contract_value"]
-                    new_val = doc.get("contract_value_rupees")
-                    if curr_val is None or (
-                        curr_val % 100000 == 0 and new_val % 100000 != 0
-                    ):
-                        projects_dict[p_name]["contract_value"] = new_val
-                if not projects_dict[p_name]["completion_date"] and doc.get(
-                    "completion_date"
-                ):
-                    projects_dict[p_name]["completion_date"] = doc.get(
-                        "completion_date"
-                    )
-                if not projects_dict[p_name]["category"] and doc.get(
-                    "project_category"
-                ):
-                    projects_dict[p_name]["category"] = doc.get("project_category")
-
-    # Insert Clients
-    client_name_to_id = {}
-    for c_name in sorted(clients_set):
-        cursor.execute("INSERT INTO clients (client_name) VALUES (?);", (c_name,))
-        client_name_to_id[c_name] = cursor.lastrowid
-
-    # Insert Employees
-    employee_name_to_id = {}
-    for emp_name in sorted(employees_set):
-        cursor.execute("INSERT INTO employees (employee_name) VALUES (?);", (emp_name,))
-        employee_name_to_id[emp_name] = cursor.lastrowid
-
-    # Insert Projects
-    project_name_to_id = {}
-    for p_name, p_info in sorted(projects_dict.items()):
-        c_id = (
-            client_name_to_id.get(p_info["client_name"])
-            if p_info["client_name"]
-            else None
+        m_pname = re.search(
+            r"(?:Work|Project Name)\s+(.*?)(?=\n(?:Client|Scope|Work Category|Category|Contract|Completion|Project Manager|Project Lead)\b|\n[A-Z]|\n\n|$)",
+            txt,
+            re.DOTALL,
         )
-        e_id = (
-            employee_name_to_id.get(p_info["employee_name"])
-            if p_info["employee_name"]
-            else None
+        pname = m_pname.group(1).replace("\n", " ").strip() if m_pname else f"Project_Pkg_{pkg_num}"
+
+        m_client = re.search(
+            r"Client\s+(.*?)(?=\n(?:Category|Scope|Executed Value|Contract|Completion|Project Lead|Project Manager)\b|\n[A-Z]|\n\n|$)",
+            txt,
+            re.DOTALL,
         )
+        cname = m_client.group(1).replace("\n", " ").strip() if m_client else None
+        c_id = get_client_id(cname)
+
+        m_cat = re.search(
+            r"(?:Work Category|Category)\s+(.*?)(?=\n(?:Contract Value|Executed Value|Completion|Project Lead|Project Manager)\b|\n[A-Z]|\n\n|$)",
+            txt,
+            re.DOTALL,
+        )
+        cat = m_cat.group(1).replace("\n", " ").strip() if m_cat else None
+
+        m_val = re.search(
+            r"(?:Executed Value|Contract Value)\s+(INR\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?|Rs\.\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?|[\d\.,]+\s+Crore|[\d\.,]+\s+Lakh)",
+            txt,
+            re.IGNORECASE,
+        )
+        val_raw = m_val.group(1).strip() if m_val else None
+        val_inr = normalize_currency(val_raw)
+
+        m_date = re.search(
+            r"(?:Completion Date|Completion)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+            txt,
+        )
+        cdate = normalize_date(m_date.group(1).strip()) if m_date else None
+        cyear = int(cdate[:4]) if cdate and len(cdate) >= 4 and cdate[:4].isdigit() else None
+
+        m_mgr = re.search(
+            r"(?:Project Lead|Project Manager|Contractor\'s Project Manager|supervised on the contractor\'s side by)[:\s]*\n?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
+            txt,
+        )
+        mgr_name = m_mgr.group(1).strip() if m_mgr else None
+        e_id = get_emp_id(mgr_name)
 
         cursor.execute(
             """
-            INSERT INTO projects (project_name, client_id, employee_id, contract_value, completion_date, category)
-            VALUES (?, ?, ?, ?, ?, ?);
+            INSERT INTO projects (pkg_num, project_name, client_id, employee_id, contract_value, completion_date, completion_year, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """,
-            (
-                p_name,
-                c_id,
-                e_id,
-                p_info["contract_value"],
-                p_info["completion_date"],
-                p_info["category"],
-            ),
+            (pkg_num, pname, c_id, e_id, val_inr, cdate, cyear, cat),
         )
-        project_name_to_id[p_name] = cursor.lastrowid
 
-    # Insert Certifications
+        projects_pkg_map[pkg_num] = cursor.lastrowid
+
+    # 2. Map Certifications
     cert_count = 0
     for doc_id, doc in extracted.items():
-        if doc.get("doc_type") == "personnel_certificate" and doc.get(
-            "certification_type"
-        ):
-            emp_name = clean_name(doc.get("employee_name"))
-            e_id = employee_name_to_id.get(emp_name) if emp_name else None
+        if doc.get("doc_type") == "personnel_certificate" and doc.get("certification_type"):
+            e_name = doc.get("employee_name")
+            e_id = get_emp_id(e_name)
             cert_type = doc.get("certification_type")
             issue_date = doc.get("certification_date")
-
             if e_id:
                 cursor.execute(
-                    """
-                    INSERT INTO certifications (employee_id, cert_type, issue_date)
-                    VALUES (?, ?, ?);
-                """,
+                    "INSERT INTO certifications (employee_id, cert_type, issue_date) VALUES (?, ?, ?);",
                     (e_id, cert_type, issue_date),
                 )
                 cert_count += 1
 
-    # Insert Documents
+    # 3. Map Reference Letters & Documents
+    ref_pkg_nums = set()
+    ref_files = sorted(glob.glob("documents/reference_letter/*.pdf"))
+    for f in ref_files:
+        d = pymupdf.open(f)
+        txt = "\n".join([p.get_text() for p in d])
+        d.close()
+        m_pkg = re.search(r"Pkg-(\d+)", txt, re.IGNORECASE)
+        if m_pkg:
+            ref_pkg_nums.add(int(m_pkg.group(1)))
+
     doc_count = 0
     for doc_id, doc in extracted.items():
         doc_type = doc.get("doc_type")
-        p_name = clean_name(doc.get("project_name"))
-        c_name = clean_client_name(doc.get("client_name"))
+        cname = doc.get("client_name")
+        c_id = get_client_id(cname)
 
-        p_id = project_name_to_id.get(p_name) if p_name else None
-        c_id = client_name_to_id.get(c_name) if c_name else None
+        pname = doc.get("project_name")
+        pkg_num = None
+        if pname:
+            m_pkg = re.search(r"Pkg-(\d+)", pname, re.IGNORECASE)
+            if m_pkg:
+                pkg_num = int(m_pkg.group(1))
 
-        has_ref = (
-            1
-            if (
-                doc_type == "reference_letter"
-                or (p_name and p_name in projects_with_ref_letter)
-            )
-            else 0
-        )
+        p_id = projects_pkg_map.get(pkg_num) if pkg_num else None
+        has_ref = 1 if (doc_type == "reference_letter" or (pkg_num and pkg_num in ref_pkg_nums)) else 0
 
         cursor.execute(
-            """
-            INSERT INTO documents (doc_id, doc_type, project_id, client_id, has_reference_letter)
-            VALUES (?, ?, ?, ?, ?);
-        """,
+            "INSERT INTO documents (doc_id, doc_type, project_id, client_id, has_reference_letter) VALUES (?, ?, ?, ?, ?);",
             (doc_id, doc_type, p_id, c_id, has_ref),
         )
         doc_count += 1
+
+    # 4. Populate financial_billing from Receivables_Ageing.xlsx
+    ageing_file = "documents/workbooks/Receivables_Ageing.xlsx"
+    if os.path.exists(ageing_file):
+        try:
+            df_age = pd.read_excel(ageing_file, sheet_name="AR Ageing")
+            for client_raw, grp in df_age.groupby("Client"):
+                c_norm = clean_client_name(client_raw)
+                c_id = clients_map.get(c_norm) if c_norm else None
+                if c_id:
+                    tot_invoiced = int(round(grp["Invoiced (INR)"].sum()))
+                    tot_paid = int(round(grp[grp["Status"] == "paid"]["Invoiced (INR)"].sum()))
+                    tot_due = int(round(grp[grp["Status"] == "due"]["Invoiced (INR)"].sum()))
+                    pct = round((tot_paid / tot_invoiced) * 100.0, 2) if tot_invoiced > 0 else 0.0
+
+                    cursor.execute(
+                        """
+                        INSERT INTO financial_billing (client_id, invoiced_value, paid_value, due_value, collection_pct)
+                        VALUES (?, ?, ?, ?, ?);
+                    """,
+                        (c_id, tot_invoiced, tot_paid, tot_due, pct),
+                    )
+        except Exception as e:
+            print(f"Warning: Financial billing parsing error: {e}")
 
     conn.commit()
     conn.close()
 
     print("\nPhase 4 Database Population Summary:")
-    print(f"- Clients populated: {len(client_name_to_id)}")
-    print(f"- Employees populated: {len(employee_name_to_id)}")
-    print(f"- Projects populated: {len(project_name_to_id)}")
+    print(f"- Clients populated: {len(clients_map)}")
+    print(f"- Employees populated: {len(employees_map)}")
+    print(f"- Projects populated: {len(projects_pkg_map)}")
     print(f"- Certifications populated: {cert_count}")
     print(f"- Documents populated: {doc_count}")
     print(f"Phase 4 Complete! SQLite database created at {DB_FILE}")
@@ -317,3 +252,5 @@ def build_database():
 
 if __name__ == "__main__":
     build_database()
+
+

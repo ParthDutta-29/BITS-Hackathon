@@ -16,7 +16,7 @@ class ExtractedEntity(BaseModel):
     completion_date: Optional[str] = None  # YYYY-MM-DD
     contract_value_raw: Optional[str] = None
     contract_value_rupees: Optional[int] = None
-    project_category: Optional[str] = None  # Water Treatment, Bridge, Road, Building
+    project_category: Optional[str] = None
     has_reference_letter: Optional[bool] = None
 
 
@@ -69,18 +69,8 @@ def normalize_date(date_str: Optional[str]) -> Optional[str]:
 
     # DD Mon YYYY
     months = {
-        "jan": 1,
-        "feb": 2,
-        "mar": 3,
-        "apr": 4,
-        "may": 5,
-        "jun": 6,
-        "jul": 7,
-        "aug": 8,
-        "sep": 9,
-        "oct": 10,
-        "nov": 11,
-        "dec": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
     }
     m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", date_str)
     if m:
@@ -95,12 +85,14 @@ def clean_employee_name(name: Optional[str]) -> Optional[str]:
     if not name or not isinstance(name, str):
         return None
     n = re.sub(r"\s+", " ", name).strip()
+    n = re.split(r"\n|Employee|ID|National|Credential|Defect|Client|Retention|Director|DOC-|\.", n)[0].strip()
     if (
         "national infrastructure" in n.lower()
         or "director" in n.lower()
         or "authorise" in n.lower()
         or "department" in n.lower()
         or len(n) > 35
+        or len(n) < 3
     ):
         return None
     return n or None
@@ -110,95 +102,11 @@ def clean_client_name(client: Optional[str]) -> Optional[str]:
     if not client or not isinstance(client, str):
         return None
     c = client.strip()
-    if "works for " in c:
-        m = re.search(r"works for\s+([A-Za-z0-9\s,\.&]+?)(?=\s+completed|\s*$)", c)
-        if m:
-            c = m.group(1)
-    c = re.sub(
-        r"\s+(?:GOVERNMENT|PRIVATE|PSU|CLIENT|IN REFERENCE LETTER|To Whomsoever|Reference Letter).*$",
-        "",
-        c,
-        flags=re.IGNORECASE,
-    )
-    c = re.sub(r"\s*\((?:government|Government|psu|PSU|private|Private)\)", "", c)
-    c = re.sub(r"^(?:For\s+|Issued by\s+|Client\s+|Office of\s+)", "", c)
+    c = re.sub(r"\s*\((?:government|psu|private)\)", "", c, flags=re.IGNORECASE).strip()
+    c = re.sub(r"^(?:For\s+|Issued by\s+|Client\s+|Office of\s+)", "", c).strip()
     c = re.sub(r"\s+", " ", c).strip()
-
-    c_lower = c.lower()
-    if c_lower in [
-        "gujarat",
-        "odisha",
-        "jharkhand",
-        "delhi",
-        "rajasthan",
-        "maharashtra",
-        "west bengal",
-        "tamil nadu",
-        "madhya pradesh",
-    ]:
+    if not c or c.lower() in ["gujarat", "odisha", "jharkhand", "delhi", "rajasthan", "maharashtra", "west bengal", "tamil nadu", "madhya pradesh"]:
         return None
-
-    if "jal nigam" in c_lower and "jharkhand" in c_lower:
-        return "Jal Nigam, Jharkhand"
-    elif "jal nigam" in c_lower and "gujarat" in c_lower:
-        return "Jal Nigam, Gujarat"
-    elif "jal nigam" in c_lower and "uttar pradesh" in c_lower:
-        return "Jal Nigam, Uttar Pradesh"
-    elif "public health engineering" in c_lower and (
-        "gujarat" in c_lower or "govt of gujarat" in c_lower
-    ):
-        return "Public Health Engineering Dept, Govt of Gujarat"
-    elif "public health engineering" in c_lower and (
-        "odisha" in c_lower or "govt of odisha" in c_lower
-    ):
-        return "Public Health Engineering Dept, Govt of Odisha"
-    elif "public works department" in c_lower and "gujarat" in c_lower:
-        return "Public Works Department, Govt of Gujarat"
-    elif "public works department" in c_lower and "maharashtra" in c_lower:
-        return "Public Works Department, Govt of Maharashtra"
-    elif "public works department" in c_lower and "west bengal" in c_lower:
-        return "Public Works Department, Govt of West Bengal"
-    elif "public works department" in c_lower and "tamil nadu" in c_lower:
-        return "Public Works Department, Govt of Tamil Nadu"
-    elif "irrigation & waterways" in c_lower and "west bengal" in c_lower:
-        return "Irrigation & Waterways Dept, Govt of West Bengal"
-    elif "irrigation & waterways" in c_lower and "uttar pradesh" in c_lower:
-        return "Irrigation & Waterways Dept, Govt of Uttar Pradesh"
-    elif "irrigation & waterways" in c_lower and "rajasthan" in c_lower:
-        return "Irrigation & Waterways Dept, Govt of Rajasthan"
-    elif "jharkhand municipal" in c_lower:
-        return "Jharkhand Municipal Corporation"
-    elif "maharashtra municipal" in c_lower:
-        return "Maharashtra Municipal Corporation"
-    elif "gujarat municipal" in c_lower:
-        return "Gujarat Municipal Corporation"
-    elif "tamil nadu municipal" in c_lower:
-        return "Tamil Nadu Municipal Corporation"
-    elif "lakshya engineering" in c_lower:
-        return "Lakshya Engineering & Construction"
-    elif "national expressway" in c_lower:
-        return "National Expressway Development Authority"
-    elif "national special projects" in c_lower:
-        return "National Special Projects Office"
-    elif "mega infrastructure" in c_lower:
-        return "Mega Infrastructure Authority"
-    elif "meridian constructors" in c_lower:
-        return "Meridian Constructors & Co."
-    elif "peninsular petroleum" in c_lower:
-        return "Peninsular Petroleum Corporation"
-    elif "suvarna projects" in c_lower:
-        return "Suvarna Projects Limited"
-    elif "trishakti power" in c_lower:
-        return "Trishakti Power Generation Corporation"
-    elif "mahanadi steel" in c_lower:
-        return "Mahanadi Steel Corporation"
-    elif "subarnarekha valley" in c_lower:
-        return "Subarnarekha Valley Corporation"
-    elif "arunodaya infrastructure" in c_lower:
-        return "Arunodaya Infrastructure"
-    elif "central works" in c_lower:
-        return "Central Works & Buildings Bureau"
-
     return c or None
 
 
@@ -210,64 +118,36 @@ def extract_document_entity(
     if doc_type in ["company_completion_certificate", "completion_certificate"]:
         # Project Name
         pm = (
-            re.search(
-                r"Project Name\s+(.*?)(?=\s+\b(?:Client|Scope|Work Category|Category|Contract|Completion|Project Manager)\b|$)",
-                content,
-            )
-            or re.search(
-                r"Name of Work\s+(.*?)(?=\s+\b(?:Nature|Category|Contract|Completion|Defect)\b|$)",
-                content,
-            )
-            or re.search(r"work of\s+([A-Za-z0-9\s\-]+?)\s*\(", content)
-            or re.search(r"work of\s+([A-Za-z0-9\s\-]+?)\s*,", content)
-            or re.search(r"work of\s+([A-Za-z0-9\s\-]+?)\s+awarded to", content)
-            or re.search(
-                r"Work\s+(.*?)(?=\s+\b(?:Client|Category|Executed Value|Completion|Project Lead)\b|$)",
-                content,
-            )
+            re.search(r"(?:Work|Project Name)\s+(.*?)(?=\n(?:Client|Scope|Work Category|Category|Contract|Completion|Project Manager|Project Lead)\b|\n[A-Z]|\n\n|$)", content, re.DOTALL)
+            or re.search(r"Name of Work\s+(.*?)(?=\n(?:Nature|Category|Contract|Completion|Defect)\b|$)", content, re.DOTALL)
+            or re.search(r"work of\s+([A-Za-z0-9\s\-\–\—\.\,\&]+?)\s*\(", content)
+            or re.search(r"work of\s+([A-Za-z0-9\s\-\–\—\.\,\&]+?)\s*,", content)
+            or re.search(r"work of\s+([A-Za-z0-9\s\-\–\—\.\,\&]+?)\s+awarded to", content)
         )
         if pm:
-            entity.project_name = pm.group(1).strip()
+            entity.project_name = pm.group(1).replace("\n", " ").strip()
 
         # Client Name
         cm = (
-            re.search(
-                r"Client\s+(.*?)(?=\s+(?:Scope|Category|Executed Value|Contract|Completion|Project Lead|Manager|$))",
-                content,
-            )
+            re.search(r"Client\s+(.*?)(?=\n(?:Category|Scope|Executed Value|Contract|Completion|Project Lead|Project Manager)\b|\n[A-Z]|\n\n|$)", content, re.DOTALL)
             or re.search(r"Issued by\s+(.*?)(?=\s+REF|Ref|Date|$)", content)
-            or re.search(
-                r"Office of the Executive Engineer\s+(.*?)(?=\s+IN No|Dated|$)", content
-            )
-            or re.search(r"for\s+(.*?)\s+completed \d{4}", content)
-            or re.search(
-                r"^(.*?)\s+(?:Work Completion Certificate|WORK COMPLETION CERTIFICATE)",
-                content,
-                re.MULTILINE,
-            )
+            or re.search(r"Office of the Executive Engineer\s+(.*?)(?=\s+IN No|Dated|$)", content)
+            or re.search(r"^(.*?)\s+(?:Work Completion Certificate|WORK COMPLETION CERTIFICATE)", content, re.MULTILINE)
         )
         if cm:
-            entity.client_name = clean_client_name(cm.group(1))
+            entity.client_name = clean_client_name(cm.group(1).replace("\n", " "))
 
         # Category
         catm = (
-            re.search(
-                r"(?:Work Category|Category)\s+(.*?)(?=\s+(?:Contract Value|Executed Value|Completion|Project Lead|$))",
-                content,
-            )
+            re.search(r"(?:Work Category|Category)\s+(.*?)(?=\n(?:Contract Value|Executed Value|Completion|Project Lead|Project Manager)\b|\n[A-Z]|\n\n|$)", content, re.DOTALL)
             or re.search(r"Nature / Category\s+(.*?)(?=\s+Contract)", content)
-            or re.search(r"\(([^)]+)\),\s*awarded to M/s", content)
         )
         if catm:
-            entity.project_category = catm.group(1).strip()
+            entity.project_category = catm.group(1).replace("\n", " ").strip()
 
-        # Contract Value Raw
+        # Executed Value
         vm = re.search(
             r"(?:gross executed value of|Executed Value|Contract Value|Value)\s+(INR\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?|Rs\.\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?|[\d\.,]+\s+Crore|[\d\.,]+\s+Lakh)",
-            content,
-            re.IGNORECASE,
-        ) or re.search(
-            r"(INR\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?|Rs\.\s+[\d\.,]+(?:\/\-)?\s*(?:Cr|Crore|Lakh|Lakhs)?)",
             content,
             re.IGNORECASE,
         )
@@ -278,16 +158,14 @@ def extract_document_entity(
         dm = re.search(
             r"(?:Completion Date|Completion|completed on)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
             content,
-        ) or re.search(r"on\s+(\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})", content)
+        )
         if dm:
             entity.completion_date = normalize_date(dm.group(1).strip())
 
         # Employee Name (Project Lead / Manager)
         em = re.search(
-            r"(?:Project Lead|Project Manager|Contractor\'s Project Manager|supervised on the contractor\'s side by)\s+([A-Za-z\s]+?)(?=\s+2\.|\s+DECLARATION|\s+Defect|\s+Client|\s+Retention|\s+Director|\s+DOC-|\.|$)",
+            r"(?:Project Lead|Project Manager|Contractor\'s Project Manager|supervised on the contractor\'s side by)[:\s]*\n?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
             content,
-        ) or re.search(
-            r"Manager\s+([A-Za-z\s]+?)(?=\s+2\.|\s+DECLARATION|\s+DOC-|$)", content
         )
         if em:
             entity.employee_name = clean_employee_name(em.group(1))
@@ -297,127 +175,54 @@ def extract_document_entity(
 
         # Client Name
         cm = (
-            re.search(
-                r"^(.*?)\s+(?:Letter of Recommendation|government|PSU CLIENT|PRIVATE CLIENT|Ref:)",
-                content,
-                re.MULTILINE,
-            )
+            re.search(r"^(.*?)\s*(?:Letter of Recommendation|Letter of Appreciation|government|PSU CLIENT|PRIVATE CLIENT|Ref:)", content, re.MULTILINE)
             or re.search(r"For\s+(.*?)\s+DOC-REF", content)
-            or re.search(
-                r"Contact for Verification\s+[A-Za-z\s]+\s+([A-Za-z0-9\s,\.]+?)\s+DOC-REF",
-                content,
-            )
         )
         if cm:
-            entity.client_name = clean_client_name(cm.group(1))
+            entity.client_name = clean_client_name(cm.group(1).replace("\n", " "))
 
         # Project Name
         pm = (
-            re.search(
-                r"Project Name\s+(.*?)(?=\s+(?:Scope|Nature|Contract|Date|$))", content
-            )
-            or re.search(r"work\s+([A-Za-z0-9\s\-]+?)\s*\(", content)
-            or re.search(
-                r"Work Executed\s+([A-Za-z0-9\s\-]+?)\s+(?:Value|Completed)", content
-            )
-            or re.search(
-                r"Subject: Performance of M/s National Infrastructure Corp\. Ltd\.\s+([A-Za-z0-9\s\-]+)",
-                content,
-            )
+            re.search(r"Work Executed\s*\n?\s*([^\n]+)", content)
+            or re.search(r"for the work\s+[^\w]*([^\n\(]+?)[^\w]*\s*\(INR", content, re.IGNORECASE)
+            or re.search(r"Subject:.*?[–—\-]\s*[^\w]*([^\n”\"\'\’\ufffd]+)", content)
+            or re.search(r"Project Name\s*\n?\s*([^\n]+)", content)
+            or re.search(r"([A-Za-z0-9\s\-\–\—\.\,\&]+?\s+Pkg-\d+)", content)
         )
         if pm:
             entity.project_name = pm.group(1).strip()
 
-        # Contract Value Raw
-        vm = re.search(
-            r"\((INR\s+[\d\.]+\s+[A-Za-z]+)\)|Value\s+(INR\s+[\d\.]+\s+[A-Za-z]+|Rs\.\s+[\d\.]+\s+[A-Za-z]+)",
-            content,
-        )
-        if vm:
-            entity.contract_value_raw = (vm.group(1) or vm.group(2)).strip()
-
-        # Completion Date
-        dm = re.search(
-            r"(?:completed on|Completed|Date of Completion)\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}|\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})",
-            content,
-        )
-        if dm:
-            entity.completion_date = normalize_date(dm.group(1).strip())
-
     elif doc_type == "personnel_certificate":
         # Certified Person Name
         em = (
-            re.search(r"conferred upon\s+([A-Za-z\s]+?)\s+of", content)
-            or re.search(r"certify that\s+([A-Za-z\s]+?)\s+Employee ID", content)
-            or re.search(r"Registrar\s+([A-Za-z\s]+?)\s+(?:PMI|ASQ)", content)
-            or re.search(r"Name\s+([A-Za-z\s]+?)\s+Employee ID", content)
+            re.search(r"conferred upon\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)", content)
+            or re.search(r"certify that\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)", content)
+            or re.search(r"Name\s*\n?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)", content)
         )
         if em:
             entity.employee_name = clean_employee_name(em.group(1))
 
         # Certification Type
         ctm = (
-            re.search(
-                r"Credential Type\s+([A-Za-z0-9\s]+?)(?=\s+Credential ID|\s+Issuing|$)",
-                content,
-            )
-            or re.search(
-                r"(PMP|Six Sigma Black Belt|ISO 9001 Lead Auditor|PRINCE2 Practitioner|LEED AP)",
-                content,
-                re.IGNORECASE,
-            )
-            or re.search(r"([A-Za-z0-9\s]+?)\s+CERTIFICATION", content)
+            re.search(r"(PMP|Six Sigma Black Belt|ISO 9001 Lead Auditor|PRINCE2 Practitioner|LEED AP)", content, re.IGNORECASE)
+            or re.search(r"Credential Type\s*\n?\s*([A-Za-z0-9\s]+)", content)
         )
         if ctm:
             entity.certification_type = ctm.group(1).strip()
 
         # Issue Date
         dtm = re.search(
-            r"(?:Issued|Date of Issue)\s*:?\s*(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+            r"(?:Issued|Date of Issue|Dated)\s*:?\s*(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
             content,
+            re.IGNORECASE,
         )
         if dtm:
             entity.certification_date = normalize_date(dtm.group(1).strip())
 
     elif doc_type == "cv":
-        em = re.search(r"Name\s+([A-Za-z\s]+?)\s+Employee ID", content) or re.search(
-            r"CurriCulum Vitae\s+([A-Za-z\s]+?)\s+Designation", content
-        )
+        em = re.search(r"Name\s*\n?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)", content)
         if em:
             entity.employee_name = clean_employee_name(em.group(1))
-
-    elif doc_type == "performance_bond":
-        # Client / Employer
-        cm = re.search(
-            r"To:\s*(.*?)(?=\s+Subject|\s+India|\s+The Employer|$)", content
-        ) or re.search(r"To,\s*(.*?)(?=\s+Subject|$)", content)
-        if cm:
-            entity.client_name = clean_client_name(cm.group(1))
-
-        # Project / Tender Ref
-        pm = (
-            re.search(
-                r"Subject:\s*Performance Bond\s+([A-Za-z0-9\s\-\(\)]+?)(?=\s+Dear|\s+Subject|\s+Value|$)",
-                content,
-            )
-            or re.search(
-                r"Tender Ref:\s*([A-Za-z0-9\-\s]+?)(?=\s+Dear|\s+Subject|\s+Value|$)",
-                content,
-            )
-            or re.search(
-                r"work of\s+([A-Za-z0-9\s,\-]+?)(?=\s*,|\s+and WHEREAS|$)", content
-            )
-        )
-        if pm:
-            entity.project_name = pm.group(1).strip()
-
-        # Bond Value
-        vm = re.search(
-            r"(?:exceeding|amount of|not exceeding)\s+(Rs\.\s+[\d\.]+\s+[A-Za-z]+|INR\s+[\d\.]+\s+[A-Za-z]+|Rs\.\s+[\d\.,]+)",
-            content,
-        )
-        if vm:
-            entity.contract_value_raw = vm.group(1).strip()
 
     # Calculate contract_value_rupees if raw contract value exists
     if entity.contract_value_raw:
@@ -451,25 +256,15 @@ def main():
 
     print(f"Saving extracted entities to {output_file}...")
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(extracted_database, f, indent=4)
+        json.dump(extracted_database, f, indent=4, ensure_ascii=False)
 
     # Print summary statistics
     projects_cnt = sum(1 for e in extracted_database.values() if e.get("project_name"))
     clients_cnt = sum(1 for e in extracted_database.values() if e.get("client_name"))
-    employees_cnt = sum(
-        1 for e in extracted_database.values() if e.get("employee_name")
-    )
-    certs_cnt = sum(
-        1 for e in extracted_database.values() if e.get("certification_type")
-    )
-    values_cnt = sum(
-        1
-        for e in extracted_database.values()
-        if e.get("contract_value_rupees") is not None
-    )
-    ref_letters_cnt = sum(
-        1 for e in extracted_database.values() if e.get("has_reference_letter")
-    )
+    employees_cnt = sum(1 for e in extracted_database.values() if e.get("employee_name"))
+    certs_cnt = sum(1 for e in extracted_database.values() if e.get("certification_type"))
+    values_cnt = sum(1 for e in extracted_database.values() if e.get("contract_value_rupees") is not None)
+    ref_letters_cnt = sum(1 for e in extracted_database.values() if e.get("has_reference_letter"))
 
     print("\nPhase 3 Extraction Summary:")
     print(f"- Total documents processed: {len(extracted_database)}")
@@ -484,3 +279,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

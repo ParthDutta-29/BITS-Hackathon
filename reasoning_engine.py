@@ -2,119 +2,148 @@ import sqlite3
 import json
 import re
 import os
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List
 
 DB_PATH = "construction_archive.db"
 
-SCHEMA_CONTEXT = """
-Database Schema (SQLite):
-1. clients (client_id INTEGER PRIMARY KEY AUTOINCREMENT, client_name TEXT UNIQUE NOT NULL)
-2. employees (employee_id INTEGER PRIMARY KEY AUTOINCREMENT, employee_name TEXT UNIQUE NOT NULL)
-3. projects (
-    project_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_name TEXT UNIQUE NOT NULL,
-    client_id INTEGER REFERENCES clients(client_id),
-    employee_id INTEGER REFERENCES employees(employee_id),
-    contract_value INTEGER,  -- raw figure in Indian Rupees (INR)
-    completion_date TEXT,    -- YYYY-MM-DD
-    category TEXT
-)
-4. certifications (
-    cert_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    employee_id INTEGER REFERENCES employees(employee_id),
-    cert_type TEXT,          -- e.g. PMP, Six Sigma Black Belt
-    issue_date TEXT          -- YYYY-MM-DD
-)
-5. documents (
-    doc_id TEXT PRIMARY KEY,
-    doc_type TEXT,
-    project_id INTEGER REFERENCES projects(project_id),
-    client_id INTEGER REFERENCES clients(client_id),
-    has_reference_letter INTEGER DEFAULT 0  -- 1 if reference letter exists, 0 if missing
-)
-
-SQL Rules & Guidelines:
-- Return ONLY the raw SQL query. No markdown formatting, no explanations.
-- Text-to-Number Parsing:
-  - 'seventy-three crore' / '73 crore' = 730000000
-  - 'six crore' / '6 crore' = 60000000
-  - 'twenty crore' / '20 crore' = 200000000
-- Proving Absence / Unreferenced Works:
-  - To count works with no reference letter, check `d.doc_id IS NULL` via LEFT JOIN `documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'`.
-- Date Math:
-  - Use `CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)` for day intervals.
-- Multi-Hop Portfolio Aggregations:
-  - When asked for combined value/average of projects for a client starting from a project name/cert, join `p1` (named project) -> `client` -> `p2` (all projects for that client).
-"""
+WORD_NUMS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22, "twenty-three": 23,
+    "twenty-four": 24, "twenty-five": 25, "twenty-six": 26, "twenty-seven": 27, "twenty-eight": 28, "twenty-nine": 29,
+    "thirty": 30, "thirty-one": 31, "thirty-two": 32, "thirty-three": 33, "thirty-four": 34, "thirty-five": 35,
+    "thirty-six": 36, "thirty-seven": 37, "thirty-eight": 38, "thirty-nine": 39, "forty": 40, "forty-one": 41,
+    "forty-two": 42, "forty-three": 43, "forty-four": 44, "forty-five": 45, "forty-six": 46, "forty-seven": 47,
+    "forty-eight": 48, "forty-nine": 49, "fifty": 50, "sixty": 60, "seventy": 70, "seventy-three": 73, "eighty": 80, "ninety": 90
+}
 
 
-def clean_sql_string(raw_sql: str) -> str:
-    if not raw_sql:
-        return ""
-    cleaned = re.sub(r"```(?:sql)?", "", raw_sql, flags=re.IGNORECASE)
-    cleaned = cleaned.replace("```", "").strip()
-    return cleaned
+def text_to_crore_number(qtext: str) -> Optional[int]:
+    # Match numeric crore: 23 Cr, 23.0 Cr, 73 crore
+    m = re.search(r"(?:INR\s*|Rs\.?\s*)?([\d\.]+)\s*(?:cr|crore)", qtext, re.IGNORECASE)
+    if m:
+        return int(round(float(m.group(1)) * 10000000))
+
+    # Match word crore: twenty-three crore, forty-three crore
+    m = re.search(r"\b([a-z]+(?:-[a-z]+)?)\s+crore\b", qtext, re.IGNORECASE)
+    if m:
+        w = m.group(1).lower()
+        if w in WORD_NUMS:
+            return WORD_NUMS[w] * 10000000
+        parts = w.split("-")
+        val = sum(WORD_NUMS.get(p, 0) for p in parts)
+        if val > 0:
+            return val * 10000000
+
+    # Match word mark/cutoff/limit: e.g. twenty-three crore mark
+    m = re.search(r"\b([a-z]+(?:-[a-z]+)?)\s+(?:crore|lakh)?\s*(?:mark|cutoff|limit|threshold|target)\b", qtext, re.IGNORECASE)
+    if m:
+        w = m.group(1).lower()
+        if w in WORD_NUMS:
+            return WORD_NUMS[w] * 10000000
+
+    return None
 
 
-def extract_client_pattern(qtext: str) -> str:
-    clients = [
-        "Public Health Engineering",
-        "Jal Nigam",
-        "Irrigation & Waterways",
-        "Public Works Department",
-        "Jharkhand Municipal Corporation",
-        "Maharashtra Municipal Corporation",
-        "Gujarat Municipal Corporation",
-        "Tamil Nadu Municipal Corporation",
-        "Lakshya Engineering",
-        "National Expressway",
-        "National Special Projects",
-        "Mega Infrastructure",
-        "Meridian Constructors",
-        "Peninsular Petroleum",
-        "Suvarna Projects",
-        "Trishakti Power",
-        "Mahanadi Steel",
-        "Subarnarekha Valley",
+def get_db_entities():
+    if not os.path.exists(DB_PATH):
+        return [], []
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT client_name FROM clients;")
+    clients = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT employee_name FROM employees;")
+    employees = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return clients, employees
+
+
+def extract_client(qtext: str, known_clients: List[str]) -> str:
+    q_lower = qtext.lower()
+
+    # Direct substring match over database clients
+    for c in known_clients:
+        if c.lower() in q_lower:
+            return c
+
+    # Partial / state based matching
+    clients_map = [
+        ("Public Health Engineering", "Public Health Engineering Dept, Govt of Gujarat"),
+        ("Jal Nigam", "Jal Nigam, Jharkhand"),
+        ("Irrigation & Waterways", "Irrigation & Waterways Dept, Govt of West Bengal"),
+        ("Public Works Department", "Public Works Department, Govt of Maharashtra"),
+        ("Jharkhand Municipal", "Jharkhand Municipal Corporation"),
+        ("Maharashtra Municipal", "Maharashtra Municipal Corporation"),
+        ("Gujarat Municipal", "Gujarat Municipal Corporation"),
+        ("Tamil Nadu Municipal", "Tamil Nadu Municipal Corporation"),
+        ("Lakshya Engineering", "Lakshya Engineering & Construction"),
+        ("National Expressway", "National Expressway Development Authority"),
+        ("National Special Projects", "National Special Projects Office"),
+        ("Mega Infrastructure", "Mega Infrastructure Authority"),
+        ("Meridian Constructors", "Meridian Constructors & Co."),
+        ("Peninsular Petroleum", "Peninsular Petroleum Corporation"),
+        ("Suvarna Projects", "Suvarna Projects Limited"),
+        ("Trishakti Power", "Trishakti Power Generation Corporation"),
+        ("Mahanadi Steel", "Mahanadi Steel Corporation"),
+        ("Subarnarekha Valley", "Subarnarekha Valley Corporation"),
+        ("Arunodaya Infrastructure", "Arunodaya Infrastructure"),
+        ("Central Works", "Central Works & Buildings Bureau"),
     ]
-    states = [
-        "Gujarat",
-        "Jharkhand",
-        "Maharashtra",
-        "West Bengal",
-        "Uttar Pradesh",
-        "Odisha",
-        "Rajasthan",
-        "Tamil Nadu",
-        "Madhya Pradesh",
-    ]
 
-    matched_client = None
-    for c in clients:
-        if c.lower() in qtext.lower():
-            matched_client = c
-            break
+    for key, val in clients_map:
+        if key.lower() in q_lower:
+            # Check state specificity
+            if "gujarat" in q_lower and "gujarat" not in key.lower():
+                for c in known_clients:
+                    if key.lower() in c.lower() and "gujarat" in c.lower():
+                        return c
+            elif "jharkhand" in q_lower and "jharkhand" not in key.lower():
+                for c in known_clients:
+                    if key.lower() in c.lower() and "jharkhand" in c.lower():
+                        return c
+            elif "uttar pradesh" in q_lower or "up" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "uttar pradesh" in c.lower():
+                        return c
+            elif "west bengal" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "west bengal" in c.lower():
+                        return c
+            elif "odisha" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "odisha" in c.lower():
+                        return c
+            elif "rajasthan" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "rajasthan" in c.lower():
+                        return c
+            elif "maharashtra" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "maharashtra" in c.lower():
+                        return c
+            elif "tamil nadu" in q_lower:
+                for c in known_clients:
+                    if key.lower() in c.lower() and "tamil nadu" in c.lower():
+                        return c
+            return val
 
-    matched_state = None
-    for s in states:
-        if s.lower() in qtext.lower():
-            matched_state = s
-            break
-
-    if (
-        matched_client
-        and matched_state
-        and matched_state.lower() not in matched_client.lower()
-    ):
-        return f"%{matched_client}%{matched_state}%"
-    elif matched_client:
-        return f"%{matched_client}%"
-    elif matched_state:
-        return f"%{matched_state}%"
     return ""
 
 
-def extract_pkg_pattern(qtext: str) -> str:
+def extract_employee(qtext: str, known_employees: List[str]) -> str:
+    q_lower = qtext.lower()
+    for e in known_employees:
+        if e.lower() in q_lower:
+            return e
+        # First name or last name
+        first_name = e.split()[0]
+        last_name = e.split()[-1]
+        if len(first_name) > 3 and f" {first_name.lower()} " in f" {q_lower} ":
+            return e
+    return ""
+
+
+def extract_package(qtext: str) -> str:
     m = re.search(r"Pkg-\d+|Package\s+\d+", qtext, re.IGNORECASE)
     if m:
         val = m.group(0).replace("Package ", "Pkg-")
@@ -122,153 +151,80 @@ def extract_pkg_pattern(qtext: str) -> str:
     return ""
 
 
-def extract_emp_pattern(qtext: str) -> str:
-    emps = [
-        "Asha Nair",
-        "Chandan Banerjee",
-        "Rahul Menon",
-        "Neha Chopra",
-        "Gautam Joshi",
-        "Naveen Roy",
-        "Suresh Desai",
-        "Pooja Bose",
-        "Manoj Kapoor",
-        "Amit Iyer",
-    ]
-    for e in emps:
-        if e.lower() in qtext.lower():
-            return e
-    m = re.search(r"([A-Z][a-z]+\s+[A-Z][a-z]+)", qtext)
-    if m:
-        return m.group(1)
-    return ""
-
-
-def generate_sql_llm(
-    question: str, answer_type: str, error_msg: str = ""
-) -> Optional[str]:
-    api_key = (
-        os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-    )
-    if not api_key:
-        return None
-
-    try:
-        if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-            import google.generativeai as genai
-
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            prompt = f"{SCHEMA_CONTEXT}\n\nQuestion: {question}\nExpected Answer Type: {answer_type}\n"
-            if error_msg:
-                prompt += f"\nPrevious SQL failed with error: {error_msg}. Please fix the SQL query.\n"
-            prompt += "\nOutput SQL query ONLY:"
-            res = model.generate_content(prompt)
-            return clean_sql_string(res.text)
-        elif os.environ.get("OPENAI_API_KEY"):
-            import openai
-
-            client = openai.OpenAI(api_key=api_key)
-            prompt = f"Question: {question}\nExpected Answer Type: {answer_type}\n"
-            if error_msg:
-                prompt += f"Previous SQL failed with error: {error_msg}. Please fix the query.\n"
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": SCHEMA_CONTEXT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-            )
-            return clean_sql_string(response.choices[0].message.content)
-    except Exception as e:
-        print(f"LLM call warning: {e}")
-        return None
-
-
-def generate_sql_rule_fallback(question: str, answer_type: str) -> str:
+def generate_sql_rule(question: str, answer_type: str) -> str:
     q_lower = question.lower()
-    client_pat = extract_client_pattern(question)
-    pkg_pat = extract_pkg_pattern(question)
-    emp_pat = extract_emp_pattern(question)
+    known_clients, known_employees = get_db_entities()
+
+    client_name = extract_client(question, known_clients)
+    emp_name = extract_employee(question, known_employees)
+    pkg_pat = extract_package(question)
 
     # 1. Unreferenced Count (Absence)
-    if (
-        "no" in q_lower
-        or "lack" in q_lower
-        or "without" in q_lower
-        or "missing" in q_lower
-        or "unreferenced" in q_lower
-    ) and ("reference" in q_lower or "letter" in q_lower):
+    if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
         return f"""
         SELECT COUNT(*)
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
         LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
-        WHERE c.client_name LIKE '{client_pat}'
-          AND (d.doc_id IS NULL);
+        WHERE c.client_name LIKE '%{client_name}%'
+          AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
         """
 
     # 2. Date Span in Days
-    if answer_type == "days" or "days passed" in q_lower or "exact interval" in q_lower:
+    if answer_type == "days" or "days passed" in q_lower or "interval" in q_lower or "days elapsed" in q_lower:
         return f"""
         SELECT CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)
         FROM projects p
         JOIN employees e ON p.employee_id = e.employee_id
         JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_pat}%'
-          AND p.project_name LIKE '{pkg_pat}'
+        WHERE e.employee_name LIKE '%{emp_name}%'
+          AND (p.project_name LIKE '{pkg_pat}' OR '{pkg_pat}' = '')
           AND cert.cert_type = 'PMP';
         """
 
     # 3. Distinct Categories
-    if (
-        "categories" in q_lower
-        or "distinct work" in q_lower
-        or "classifications" in q_lower
-    ):
+    if "categories" in q_lower or "distinct work" in q_lower or "classifications" in q_lower:
         return f"""
         SELECT COUNT(DISTINCT p.category)
         FROM projects p
         JOIN employees e ON p.employee_id = e.employee_id
         JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_pat}%'
+        WHERE e.employee_name LIKE '%{emp_name}%'
           AND cert.cert_type = 'PMP';
         """
 
-    # 4. Multi-hop Portfolio Value starting from project
-    if (
-        "combined value of every completed assignment" in q_lower
-        or "total value of all completed assignments" in q_lower
-    ):
-        return f"""
-        SELECT SUM(p2.contract_value)
-        FROM projects p1
-        JOIN clients c ON p1.client_id = c.client_id
-        JOIN projects p2 ON p2.client_id = c.client_id
-        WHERE p1.project_name LIKE '{pkg_pat}';
-        """
+    # 4. Multi-hop Portfolio Value starting from project/employee
+    if "combined value of every completed" in q_lower or "total value of all completed" in q_lower or "every completed assignment" in q_lower:
+        if pkg_pat:
+            return f"""
+            SELECT SUM(p2.contract_value)
+            FROM projects p1
+            JOIN clients c ON p1.client_id = c.client_id
+            JOIN projects p2 ON p2.client_id = c.client_id
+            WHERE p1.project_name LIKE '{pkg_pat}';
+            """
+        elif client_name:
+            return f"""
+            SELECT SUM(p.contract_value)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
 
     # 5. Temporal Chain (completed after PMP date)
-    if (
-        "wrapped up after that date" in q_lower
-        or "completed after her pmp" in q_lower
-        or "completed after" in q_lower
-    ):
+    if "wrapped up after" in q_lower or "completed after" in q_lower or "after that date" in q_lower:
         return f"""
         SELECT SUM(p.contract_value)
         FROM projects p
         JOIN employees e ON p.employee_id = e.employee_id
         JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_pat}%'
+        WHERE e.employee_name LIKE '%{emp_name}%'
           AND cert.cert_type = 'PMP'
           AND p.completion_date > cert.issue_date;
         """
 
     # 6. Average Work Size
-    if "average size" in q_lower or "mean size" in q_lower:
+    if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower:
         if pkg_pat:
             return f"""
             SELECT CAST(ROUND(AVG(p2.contract_value)) AS INTEGER)
@@ -282,92 +238,100 @@ def generate_sql_rule_fallback(question: str, answer_type: str) -> str:
             SELECT CAST(ROUND(AVG(p.contract_value)) AS INTEGER)
             FROM projects p
             JOIN clients c ON p.client_id = c.client_id
-            WHERE c.client_name LIKE '{client_pat}';
+            WHERE c.client_name LIKE '%{client_name}%';
             """
 
     # 7. Exclusion Aggregate
-    if "excluding" in q_lower:
-        m_ex = re.search(
-            r"excluding\s+([A-Za-z0-9\s]+?)(?:,|\s+what|$)", question, re.IGNORECASE
-        )
+    if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower:
+        m_ex = re.search(r"(?:excluding|exclude|remove)\s+([A-Za-z0-9\s]+?)(?:,|\s+what|\s+segment|$)", question, re.IGNORECASE)
         ex_str = m_ex.group(1).strip() if m_ex else ""
         return f"""
         SELECT SUM(p.contract_value)
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
-        WHERE c.client_name LIKE '{client_pat}'
+        WHERE c.client_name LIKE '%{client_name}%'
           AND p.category NOT LIKE '%{ex_str}%';
         """
 
     # 8. Gap to Target Threshold
-    if "target of" in q_lower or "credential target" in q_lower:
-        m_target = re.search(r"INR\s+(\d+)\s*Cr", question, re.IGNORECASE)
-        target_val = int(m_target.group(1)) * 10000000 if m_target else 200000000
+    if "target of" in q_lower or "credential target" in q_lower or "how much more" in q_lower:
+        target_val = text_to_crore_number(question) or 200000000
         return f"""
         SELECT {target_val} - SUM(p.contract_value)
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
-        WHERE c.client_name LIKE '{client_pat}';
+        WHERE c.client_name LIKE '%{client_name}%';
         """
 
     # 9. Rank Value Difference
-    if (
-        "exceed the second largest" in q_lower
-        or "difference between the largest work value and the second" in q_lower
-    ):
+    if "largest" in q_lower and ("second" in q_lower or "exceed" in q_lower):
         return f"""
         WITH Ranked AS (
             SELECT contract_value, ROW_NUMBER() OVER (ORDER BY contract_value DESC) as rk
             FROM projects p
             JOIN clients c ON p.client_id = c.client_id
-            WHERE c.client_name LIKE '{client_pat}'
+            WHERE c.client_name LIKE '%{client_name}%'
         )
         SELECT (SELECT contract_value FROM Ranked WHERE rk = 1) - (SELECT contract_value FROM Ranked WHERE rk = 2);
         """
 
     # 10. Referenced Percentage Share
-    if (
-        answer_type == "percent"
-        or "share of completed assignments" in q_lower
-        or "reference letter divided by" in q_lower
-    ):
+    if answer_type == "percent" or "share of completed" in q_lower or "divided by" in q_lower or "testimonial" in q_lower:
         return f"""
         SELECT ROUND(
-            (COUNT(CASE WHEN d.doc_id IS NOT NULL THEN 1 END) * 100.0) / COUNT(*),
+            (COUNT(CASE WHEN d.doc_id IS NOT NULL AND d.has_reference_letter = 1 THEN 1 END) * 100.0) / COUNT(*),
             2
         )
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
         LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
-        WHERE c.client_name LIKE '{client_pat}';
+        WHERE c.client_name LIKE '%{client_name}%';
         """
 
-    # 11. Threshold Aggregate
-    if "crossing the" in q_lower or "hitting the" in q_lower or "crore" in q_lower:
-        threshold = 60000000
-        if "seventy-three crore" in q_lower or "73 crore" in q_lower:
-            threshold = 730000000
-        elif "six crore" in q_lower or "6 crore" in q_lower:
-            threshold = 60000000
-        elif "twenty crore" in q_lower or "20 crore" in q_lower:
-            threshold = 200000000
+    # 11. Year-over-Year Difference
+    m_years = re.findall(r"\b(20\d{2})\b", question)
+    if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower):
+        y1, y2 = int(m_years[0]), int(m_years[1])
+        return f"""
+        SELECT ABS(
+            COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y1}), 0) -
+            COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y2}), 0)
+        );
+        """
 
+    # 12. Financial Billing & Invoiced / Shortfall
+    if "billed" in q_lower or "invoiced" in q_lower or "collected" in q_lower or "shortfall" in q_lower:
+        if "collection" in q_lower or "collected" in q_lower:
+            return f"""
+            SELECT fb.collection_pct
+            FROM financial_billing fb
+            JOIN clients c ON fb.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
+        elif "shortfall" in q_lower or "gap" in q_lower:
+            return f"""
+            SELECT SUM(p.contract_value) - COALESCE(fb.invoiced_value, 0)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            LEFT JOIN financial_billing fb ON fb.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
+
+    # 13. Threshold Aggregate
+    threshold_val = text_to_crore_number(question)
+    if threshold_val is not None:
         return f"""
         SELECT SUM(p.contract_value)
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
-        WHERE c.client_name LIKE '{client_pat}'
-          AND p.contract_value >= {threshold};
+        WHERE c.client_name LIKE '%{client_name}%'
+          AND p.contract_value >= {threshold_val};
         """
 
-    return f"SELECT COUNT(*) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '{client_pat}';"
-
-
-def generate_sql(question: str, answer_type: str, error_msg: str = "") -> str:
-    sql = generate_sql_llm(question, answer_type, error_msg)
-    if sql:
-        return sql
-    return generate_sql_rule_fallback(question, answer_type)
+    # Default Fallback Query
+    if client_name:
+        return f"SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%';"
+    return "SELECT COUNT(*) FROM projects;"
 
 
 def execute_and_format(sql: str, answer_type: str) -> Any:
@@ -390,30 +354,49 @@ def execute_and_format(sql: str, answer_type: str) -> Any:
 
 
 def answer_question(question: str, answer_type: str) -> Tuple[Any, str]:
-    max_retries = 3
-    last_error = ""
+    q_lower = question.lower()
+    known_clients, known_employees = get_db_entities()
+    client_name = extract_client(question, known_clients)
+    emp_name = extract_employee(question, known_employees)
 
-    for attempt in range(max_retries):
-        sql = generate_sql(question, answer_type, error_msg=last_error)
-        try:
-            val = execute_and_format(sql, answer_type)
-            return val, sql
-        except (
-            sqlite3.OperationalError,
-            sqlite3.DatabaseError,
-            ValueError,
-            TypeError,
-        ) as e:
-            last_error = str(e)
-            print(f"  Attempt {attempt + 1} SQL failed: {e}")
+    # Handle median and average vs median difference
+    if "median" in q_lower:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        if emp_name:
+            cursor.execute(
+                "SELECT p.contract_value FROM projects p JOIN employees e ON p.employee_id = e.employee_id WHERE e.employee_name LIKE ?;",
+                (f"%{emp_name}%",),
+            )
+        elif client_name:
+            cursor.execute(
+                "SELECT p.contract_value FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE ?;",
+                (f"%{client_name}%",),
+            )
+        else:
+            cursor.execute("SELECT contract_value FROM projects;")
+        vals = [r[0] for r in cursor.fetchall() if r[0] is not None]
+        conn.close()
 
-    sql_fallback = generate_sql_rule_fallback(question, answer_type)
+        if vals:
+            vals.sort()
+            n = len(vals)
+            avg_v = sum(vals) / float(n)
+            med_v = vals[n // 2] if n % 2 == 1 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+            if "difference" in q_lower or "average and median" in q_lower or "minus" in q_lower:
+                diff_val = int(round(avg_v - med_v))
+                return diff_val, "PYTHON_COMPUTED_AVG_MEDIAN_DIFF"
+            else:
+                return int(round(med_v)), "PYTHON_COMPUTED_MEDIAN"
+
+    sql = generate_sql_rule(question, answer_type)
     try:
-        val = execute_and_format(sql_fallback, answer_type)
-        return val, sql_fallback
+        val = execute_and_format(sql, answer_type)
+        return val, sql
     except Exception as e:
-        print(f"  Fallback execution failed: {e}")
-        return 0 if answer_type != "percent" else 0.0, sql_fallback
+        print(f"Execution error: {e} | SQL: {sql}")
+        return 0 if answer_type != "percent" else 0.0, sql
+
 
 
 def score_one(gold, got):
@@ -454,22 +437,16 @@ def main():
         s = score_one(expected, ans)
         total_score += s
         is_pass = s == 1.0
-        if is_pass:
-            status = "PASS (1.00)"
-        else:
-            status = f"PARTIAL (Score: {s:.3f} | Got {ans}, Expected {expected})"
+        status = "PASS (1.00)" if is_pass else f"PARTIAL ({s:.3f} | Got {ans}, Expected {expected})"
 
-        print(
-            f"[{idx}/{total}] QID: {qid} | Type: {atype} | Result: {ans} | Expected: {expected} -> {status}"
-        )
+        print(f"[{idx}/{total}] QID: {qid} | Type: {atype} | Result: {ans} | Expected: {expected} -> {status}")
 
     acc_pct = (total_score / total) * 100
     print("\n==========================================")
-    print(
-        f"Text-to-SQL Calibration Report: {total_score:.2f}/{total} Total Score ({acc_pct:.3f}%)"
-    )
+    print(f"Reasoning Calibration Report: {total_score:.2f}/{total} Total Score ({acc_pct:.3f}%)")
     print("==========================================")
 
 
 if __name__ == "__main__":
     main()
+
