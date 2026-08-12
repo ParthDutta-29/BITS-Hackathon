@@ -159,81 +159,39 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
     emp_name = extract_employee(question, known_employees)
     pkg_pat = extract_package(question)
 
-    # 1. Unreferenced Count (Absence)
-    if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
-        return f"""
-        SELECT COUNT(*)
-        FROM projects p
-        JOIN clients c ON p.client_id = c.client_id
-        LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
-        WHERE c.client_name LIKE '%{client_name}%'
-          AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
-        """
+    # Package to Client Resolution if Client is missing
+    if not client_name and pkg_pat:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT c.client_name FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE p.project_name LIKE ?;", (pkg_pat,))
+        r = c.fetchone()
+        conn.close()
+        if r:
+            client_name = r[0]
 
-    # 2. Date Span in Days
-    if answer_type == "days" or "days passed" in q_lower or "interval" in q_lower or "days elapsed" in q_lower:
-        return f"""
-        SELECT CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)
-        FROM projects p
-        JOIN employees e ON p.employee_id = e.employee_id
-        JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_name}%'
-          AND (p.project_name LIKE '{pkg_pat}' OR '{pkg_pat}' = '')
-          AND cert.cert_type = 'PMP';
-        """
-
-    # 3. Distinct Categories
-    if "categories" in q_lower or "distinct work" in q_lower or "classifications" in q_lower:
-        return f"""
-        SELECT COUNT(DISTINCT p.category)
-        FROM projects p
-        JOIN employees e ON p.employee_id = e.employee_id
-        JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_name}%'
-          AND cert.cert_type = 'PMP';
-        """
-
-    # 4. Multi-hop Portfolio Value starting from project/employee
-    if "combined value of every completed" in q_lower or "total value of all completed" in q_lower or "every completed assignment" in q_lower:
+    # 1. Date Span in Days
+    if answer_type == "days" or "days passed" in q_lower or "days elapsed" in q_lower or "interval" in q_lower:
         if pkg_pat:
             return f"""
-            SELECT SUM(p2.contract_value)
-            FROM projects p1
-            JOIN clients c ON p1.client_id = c.client_id
-            JOIN projects p2 ON p2.client_id = c.client_id
-            WHERE p1.project_name LIKE '{pkg_pat}';
-            """
-        elif client_name:
-            return f"""
-            SELECT SUM(p.contract_value)
+            SELECT CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)
             FROM projects p
-            JOIN clients c ON p.client_id = c.client_id
-            WHERE c.client_name LIKE '%{client_name}%';
+            JOIN employees e ON p.employee_id = e.employee_id
+            JOIN certifications cert ON cert.employee_id = e.employee_id
+            WHERE p.project_name LIKE '{pkg_pat}' AND cert.cert_type = 'PMP';
             """
-
-    # 5. Temporal Chain (completed after PMP date)
-    if "wrapped up after" in q_lower or "completed after" in q_lower or "after that date" in q_lower:
-        return f"""
-        SELECT SUM(p.contract_value)
-        FROM projects p
-        JOIN employees e ON p.employee_id = e.employee_id
-        JOIN certifications cert ON cert.employee_id = e.employee_id
-        WHERE e.employee_name LIKE '%{emp_name}%'
-          AND cert.cert_type = 'PMP'
-          AND p.completion_date > cert.issue_date;
-        """
-
-    # 6. Average Work Size
-    if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower:
-        if pkg_pat:
+        elif emp_name:
             return f"""
-            SELECT CAST(ROUND(AVG(p2.contract_value)) AS INTEGER)
-            FROM projects p1
-            JOIN clients c ON p1.client_id = c.client_id
-            JOIN projects p2 ON p2.client_id = c.client_id
-            WHERE p1.project_name LIKE '{pkg_pat}';
+            SELECT CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)
+            FROM projects p
+            JOIN employees e ON p.employee_id = e.employee_id
+            JOIN certifications cert ON cert.employee_id = e.employee_id
+            WHERE e.employee_name LIKE '%{emp_name}%' AND cert.cert_type = 'PMP'
+            LIMIT 1;
             """
-        else:
+
+    # 2. Average Work Size
+    if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower:
+        if client_name:
             return f"""
             SELECT CAST(ROUND(AVG(p.contract_value)) AS INTEGER)
             FROM projects p
@@ -241,74 +199,55 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 7. Exclusion Aggregate
-    if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower:
-        m_ex = re.search(r"(?:excluding|exclude|remove)\s+([A-Za-z0-9\s]+?)(?:,|\s+what|\s+segment|$)", question, re.IGNORECASE)
-        ex_str = m_ex.group(1).strip() if m_ex else ""
-        return f"""
-        SELECT SUM(p.contract_value)
-        FROM projects p
-        JOIN clients c ON p.client_id = c.client_id
-        WHERE c.client_name LIKE '%{client_name}%'
-          AND p.category NOT LIKE '%{ex_str}%';
-        """
+    # 3. Distinct Categories
+    if "categories" in q_lower or "classifications" in q_lower or "distinct work" in q_lower:
+        if emp_name:
+            return f"""
+            SELECT COUNT(DISTINCT p.category)
+            FROM projects p
+            JOIN employees e ON p.employee_id = e.employee_id
+            WHERE e.employee_name LIKE '%{emp_name}%';
+            """
 
-    # 8. Gap to Target Threshold
-    if "target of" in q_lower or "credential target" in q_lower or "how much more" in q_lower:
-        target_val = text_to_crore_number(question) or 200000000
-        return f"""
-        SELECT {target_val} - SUM(p.contract_value)
-        FROM projects p
-        JOIN clients c ON p.client_id = c.client_id
-        WHERE c.client_name LIKE '%{client_name}%';
-        """
-
-    # 9. Rank Value Difference
-    if "largest" in q_lower and ("second" in q_lower or "exceed" in q_lower):
-        return f"""
-        WITH Ranked AS (
-            SELECT contract_value, ROW_NUMBER() OVER (ORDER BY contract_value DESC) as rk
+    # 4. Absence / Unreferenced Count
+    if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
+        if client_name:
+            return f"""
+            SELECT COUNT(*)
             FROM projects p
             JOIN clients c ON p.client_id = c.client_id
+            LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
             WHERE c.client_name LIKE '%{client_name}%'
-        )
-        SELECT (SELECT contract_value FROM Ranked WHERE rk = 1) - (SELECT contract_value FROM Ranked WHERE rk = 2);
-        """
+              AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
+            """
 
-    # 10. Referenced Percentage Share
-    if answer_type == "percent" or "share of completed" in q_lower or "divided by" in q_lower or "testimonial" in q_lower:
-        return f"""
-        SELECT ROUND(
-            (COUNT(CASE WHEN d.doc_id IS NOT NULL AND d.has_reference_letter = 1 THEN 1 END) * 100.0) / COUNT(*),
-            2
-        )
-        FROM projects p
-        JOIN clients c ON p.client_id = c.client_id
-        LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
-        WHERE c.client_name LIKE '%{client_name}%';
-        """
+    # 5. Referenced Percentage Share
+    if answer_type == "percent" and ("share" in q_lower or "divided by" in q_lower or "testimonial" in q_lower or "reference letter" in q_lower):
+        if client_name:
+            return f"""
+            SELECT ROUND(
+                (COUNT(CASE WHEN d.doc_id IS NOT NULL AND d.has_reference_letter = 1 THEN 1 END) * 100.0) / COUNT(*),
+                2
+            )
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
 
-    # 11. Year-over-Year Difference
-    m_years = re.findall(r"\b(20\d{2})\b", question)
-    if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower):
-        y1, y2 = int(m_years[0]), int(m_years[1])
-        return f"""
-        SELECT ABS(
-            COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y1}), 0) -
-            COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y2}), 0)
-        );
-        """
-
-    # 12. Financial Billing & Invoiced / Shortfall
-    if "billed" in q_lower or "invoiced" in q_lower or "collected" in q_lower or "shortfall" in q_lower:
-        if "collection" in q_lower or "collected" in q_lower:
+    # 6. Financial Collection Percentage
+    if answer_type == "percent" and ("collection" in q_lower or "billed" in q_lower or "collected" in q_lower):
+        if client_name:
             return f"""
             SELECT fb.collection_pct
             FROM financial_billing fb
             JOIN clients c ON fb.client_id = c.client_id
             WHERE c.client_name LIKE '%{client_name}%';
             """
-        elif "shortfall" in q_lower or "gap" in q_lower:
+
+    # 7. Financial Shortfall / Gap (Awarded - Invoiced)
+    if "shortfall" in q_lower or "gap" in q_lower or "invoiced" in q_lower:
+        if client_name:
             return f"""
             SELECT SUM(p.contract_value) - COALESCE(fb.invoiced_value, 0)
             FROM projects p
@@ -317,21 +256,102 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
+    # 8. Exclusion Aggregate
+    if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower:
+        m_ex = re.search(r"(?:excluding|exclude|remove)\s+([A-Za-z0-9\s]+?)(?:[,\u2014\–\-]|what|segment|$)", question, re.IGNORECASE)
+        ex_str = m_ex.group(1).strip() if m_ex else ""
+        if client_name:
+            return f"""
+            SELECT SUM(p.contract_value)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%'
+              AND p.category NOT LIKE '%{ex_str}%';
+            """
+
+    # 9. Target Gap Threshold (Target - Total)
+    if "target" in q_lower or "how much more" in q_lower:
+        t_val = text_to_crore_number(question) or 200000000
+        if client_name:
+            return f"""
+            SELECT {t_val} - SUM(p.contract_value)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
+
+    # 10. Rank Value Difference (1st - 2nd Largest)
+    if "largest" in q_lower and ("second" in q_lower or "exceed" in q_lower or "difference" in q_lower):
+        if client_name:
+            return f"""
+            WITH Ranked AS (
+                SELECT contract_value, ROW_NUMBER() OVER (ORDER BY contract_value DESC) as rk
+                FROM projects p
+                JOIN clients c ON p.client_id = c.client_id
+                WHERE c.client_name LIKE '%{client_name}%'
+            )
+            SELECT (SELECT contract_value FROM Ranked WHERE rk = 1) - (SELECT contract_value FROM Ranked WHERE rk = 2);
+            """
+
+    # 11. Year-over-Year Difference
+    m_years = re.findall(r"\b(20\d{2})\b", question)
+    if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower):
+        y1, y2 = int(m_years[0]), int(m_years[1])
+        if client_name:
+            return f"""
+            SELECT ABS(
+                COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y1}), 0) -
+                COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.completion_year = {y2}), 0)
+            );
+            """
+
+    # 12. Temporal Chain (completed after cert date)
+    if "after that date" in q_lower or "completed after" in q_lower or "wrapped up after" in q_lower:
+        if emp_name:
+            return f"""
+            SELECT SUM(p.contract_value)
+            FROM projects p
+            JOIN employees e ON p.employee_id = e.employee_id
+            JOIN certifications cert ON cert.employee_id = e.employee_id
+            WHERE e.employee_name LIKE '%{emp_name}%'
+              AND cert.cert_type = 'PMP'
+              AND p.completion_date > cert.issue_date;
+            """
+
     # 13. Threshold Aggregate
     threshold_val = text_to_crore_number(question)
-    if threshold_val is not None:
+    if threshold_val is not None and ("clear" in q_lower or "crossing" in q_lower or "hitting" in q_lower or "cutoff" in q_lower or "exceed" in q_lower or "mark" in q_lower or "limit" in q_lower):
+        if client_name:
+            return f"""
+            SELECT SUM(p.contract_value)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%'
+              AND p.contract_value >= {threshold_val};
+            """
+
+    # 14. Combined value for Employee + Client
+    if emp_name and client_name:
         return f"""
         SELECT SUM(p.contract_value)
         FROM projects p
         JOIN clients c ON p.client_id = c.client_id
+        JOIN employees e ON p.employee_id = e.employee_id
         WHERE c.client_name LIKE '%{client_name}%'
-          AND p.contract_value >= {threshold_val};
+          AND e.employee_name LIKE '%{emp_name}%';
         """
 
-    # Default Fallback Query
+    # 15. Default Fallback query per client
     if client_name:
-        return f"SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%';"
+        return f"""
+        SELECT SUM(p.contract_value)
+        FROM projects p
+        JOIN clients c ON p.client_id = c.client_id
+        WHERE c.client_name LIKE '%{client_name}%';
+        """
+
     return "SELECT COUNT(*) FROM projects;"
+
 
 
 def execute_and_format(sql: str, answer_type: str) -> Any:
