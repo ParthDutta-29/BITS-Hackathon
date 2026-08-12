@@ -17,30 +17,57 @@ WORD_NUMS = {
     "forty-eight": 48, "forty-nine": 49, "fifty": 50, "sixty": 60, "seventy": 70, "seventy-three": 73, "eighty": 80, "ninety": 90
 }
 
+ALIAS_CLIENTS = {
+    "trishakti": "Trishakti Power Generation Corporation",
+    "mahanadi": "Mahanadi Steel Corporation",
+    "subarnarekha": "Subarnarekha Valley Corporation",
+    "meridian": "Meridian Constructors & Co.",
+    "peninsular": "Peninsular Petroleum Corporation",
+    "suvarna": "Suvarna Projects Limited",
+    "lakshya": "Lakshya Engineering & Construction",
+    "mega": "Mega Infrastructure Authority",
+    "arunodaya": "Arunodaya Infrastructure",
+    "gujarat pw": "Public Works Department, Govt of Gujarat",
+    "bengal pw": "Public Works Department, Govt of West Bengal",
+    "maharashtra pw": "Public Works Department, Govt of Maharashtra",
+    "mah pwd": "Public Works Department, Govt of Maharashtra",
+    "tn pw": "Public Works Department, Govt of Tamil Nadu",
+    "central works": "Central Works & Buildings Bureau",
+    "phed odisha": "Public Health Engineering Dept, Govt of Odisha",
+    "odisha phed": "Public Health Engineering Dept, Govt of Odisha",
+    "pheg gujarat": "Public Health Engineering Dept, Govt of Gujarat",
+    "phed gujarat": "Public Health Engineering Dept, Govt of Gujarat",
+    "neda": "National Expressway Development Authority",
+}
+
+
 
 def text_to_crore_number(qtext: str) -> Optional[int]:
     # Match numeric crore: 23 Cr, 23.0 Cr, 73 crore
-    m = re.search(r"(?:INR\s*|Rs\.?\s*)?([\d\.]+)\s*(?:cr|crore)", qtext, re.IGNORECASE)
+    m = re.search(r"(?:INR\s*|Rs\.?\s*)?([\d]+(?:\.[\d]+)?)\s*(?:cr|crore)", qtext, re.IGNORECASE)
     if m:
-        return int(round(float(m.group(1)) * 10000000))
+        try:
+            return int(round(float(m.group(1)) * 10000000))
+        except ValueError:
+            pass
 
     # Match word crore: twenty-three crore, forty-three crore
     m = re.search(r"\b([a-z]+(?:-[a-z]+)?)\s+crore\b", qtext, re.IGNORECASE)
     if m:
-        w = m.group(1).lower()
-        if w in WORD_NUMS:
-            return WORD_NUMS[w] * 10000000
-        parts = w.split("-")
+        word = m.group(1).lower()
+        if word in WORD_NUMS:
+            return WORD_NUMS[word] * 10000000
+        parts = word.split("-")
         val = sum(WORD_NUMS.get(p, 0) for p in parts)
         if val > 0:
             return val * 10000000
 
     # Match word mark/cutoff/limit: e.g. twenty-three crore mark
-    m = re.search(r"\b([a-z]+(?:-[a-z]+)?)\s+(?:crore|lakh)?\s*(?:mark|cutoff|limit|threshold|target)\b", qtext, re.IGNORECASE)
+    m = re.search(r"\b([a-z]+(?:-[a-z]+)?)\s+(?:mark|cutoff|limit|threshold|target)\b", qtext, re.IGNORECASE)
     if m:
-        w = m.group(1).lower()
-        if w in WORD_NUMS:
-            return WORD_NUMS[w] * 10000000
+        word = m.group(1).lower()
+        if word in WORD_NUMS:
+            return WORD_NUMS[word] * 10000000
 
     return None
 
@@ -58,96 +85,101 @@ def get_db_entities():
     return clients, employees
 
 
-def extract_client(qtext: str, known_clients: List[str]) -> str:
-    q_lower = qtext.lower()
+def extract_package(qtext: str) -> str:
+    m = re.search(r"pkg[-_\s]*(\d+)|package\s*(\d+)", qtext, re.IGNORECASE)
+    if m:
+        val = m.group(1) or m.group(2)
+        return f"%Pkg-{val}%"
+    return ""
 
-    # Direct substring match over database clients
-    for c in known_clients:
+
+def extract_client(qtext: str, known_clients: List[str]) -> str:
+
+    pkg_pat = extract_package(qtext)
+    if pkg_pat:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT c.client_name FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE p.project_name LIKE ?;", (pkg_pat,))
+        r = c.fetchone()
+        conn.close()
+        if r:
+            return r[0]
+
+    q_lower = qtext.lower()
+    for kw, target_c in ALIAS_CLIENTS.items():
+        if kw in q_lower:
+            return target_c
+
+    if "irrigation" in q_lower or "waterways" in q_lower:
+        if "west bengal" in q_lower or "bengal" in q_lower:
+            return "Irrigation & Waterways Dept, Govt of West Bengal"
+        if "uttar pradesh" in q_lower or "up " in q_lower or "u.p." in q_lower:
+            return "Irrigation & Waterways Dept, Govt of Uttar Pradesh"
+        if "rajasthan" in q_lower:
+            return "Irrigation & Waterways Dept, Govt of Rajasthan"
+
+    if "public health" in q_lower or "phe" in q_lower or "phed" in q_lower:
+        if "gujarat" in q_lower:
+            return "Public Health Engineering Dept, Govt of Gujarat"
+        if "odisha" in q_lower:
+            return "Public Health Engineering Dept, Govt of Odisha"
+
+    if "public works" in q_lower or "pwd" in q_lower or " pw" in q_lower:
+        if "west bengal" in q_lower or "bengal" in q_lower:
+            return "Public Works Department, Govt of West Bengal"
+        if "maharashtra" in q_lower:
+            return "Public Works Department, Govt of Maharashtra"
+        if "gujarat" in q_lower:
+            return "Public Works Department, Govt of Gujarat"
+        if "tamil nadu" in q_lower:
+            return "Public Works Department, Govt of Tamil Nadu"
+
+    if "jal nigam" in q_lower:
+        if "jharkhand" in q_lower:
+            return "Jal Nigam, Jharkhand"
+        if "gujarat" in q_lower:
+            return "Jal Nigam, Gujarat"
+        if "uttar pradesh" in q_lower or "up " in q_lower:
+            return "Jal Nigam, Uttar Pradesh"
+
+    if "municipal" in q_lower:
+        if "jharkhand" in q_lower:
+            return "Jharkhand Municipal Corporation"
+        if "maharashtra" in q_lower:
+            return "Maharashtra Municipal Corporation"
+        if "gujarat" in q_lower:
+            return "Gujarat Municipal Corporation"
+        if "tamil nadu" in q_lower:
+            return "Tamil Nadu Municipal Corporation"
+
+    sorted_clients = sorted(known_clients, key=lambda x: len(x), reverse=True)
+    for c in sorted_clients:
         if c.lower() in q_lower:
             return c
 
-    # Partial / state based matching
-    clients_map = [
-        ("Public Health Engineering", "Public Health Engineering Dept, Govt of Gujarat"),
-        ("Jal Nigam", "Jal Nigam, Jharkhand"),
-        ("Irrigation & Waterways", "Irrigation & Waterways Dept, Govt of West Bengal"),
-        ("Public Works Department", "Public Works Department, Govt of Maharashtra"),
-        ("Jharkhand Municipal", "Jharkhand Municipal Corporation"),
-        ("Maharashtra Municipal", "Maharashtra Municipal Corporation"),
-        ("Gujarat Municipal", "Gujarat Municipal Corporation"),
-        ("Tamil Nadu Municipal", "Tamil Nadu Municipal Corporation"),
-        ("Lakshya Engineering", "Lakshya Engineering & Construction"),
-        ("National Expressway", "National Expressway Development Authority"),
-        ("National Special Projects", "National Special Projects Office"),
-        ("Mega Infrastructure", "Mega Infrastructure Authority"),
-        ("Meridian Constructors", "Meridian Constructors & Co."),
-        ("Peninsular Petroleum", "Peninsular Petroleum Corporation"),
-        ("Suvarna Projects", "Suvarna Projects Limited"),
-        ("Trishakti Power", "Trishakti Power Generation Corporation"),
-        ("Mahanadi Steel", "Mahanadi Steel Corporation"),
-        ("Subarnarekha Valley", "Subarnarekha Valley Corporation"),
-        ("Arunodaya Infrastructure", "Arunodaya Infrastructure"),
-        ("Central Works", "Central Works & Buildings Bureau"),
-    ]
-
-    for key, val in clients_map:
-        if key.lower() in q_lower:
-            # Check state specificity
-            if "gujarat" in q_lower and "gujarat" not in key.lower():
-                for c in known_clients:
-                    if key.lower() in c.lower() and "gujarat" in c.lower():
-                        return c
-            elif "jharkhand" in q_lower and "jharkhand" not in key.lower():
-                for c in known_clients:
-                    if key.lower() in c.lower() and "jharkhand" in c.lower():
-                        return c
-            elif "uttar pradesh" in q_lower or "up" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "uttar pradesh" in c.lower():
-                        return c
-            elif "west bengal" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "west bengal" in c.lower():
-                        return c
-            elif "odisha" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "odisha" in c.lower():
-                        return c
-            elif "rajasthan" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "rajasthan" in c.lower():
-                        return c
-            elif "maharashtra" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "maharashtra" in c.lower():
-                        return c
-            elif "tamil nadu" in q_lower:
-                for c in known_clients:
-                    if key.lower() in c.lower() and "tamil nadu" in c.lower():
-                        return c
-            return val
+    # Match state names for State Authority clients
+    states = ["madhya pradesh", "uttar pradesh", "west bengal", "maharashtra", "tamil nadu", "jharkhand", "rajasthan", "gujarat", "odisha", "delhi"]
+    for st in states:
+        if st in q_lower:
+            for c in known_clients:
+                if st in c.lower():
+                    return c
 
     return ""
+
+
 
 
 def extract_employee(qtext: str, known_employees: List[str]) -> str:
     q_lower = qtext.lower()
-    for e in known_employees:
+    sorted_employees = sorted(known_employees, key=lambda x: len(x), reverse=True)
+    for e in sorted_employees:
         if e.lower() in q_lower:
             return e
-        # First name or last name
+    for e in sorted_employees:
         first_name = e.split()[0]
-        last_name = e.split()[-1]
-        if len(first_name) > 3 and f" {first_name.lower()} " in f" {q_lower} ":
+        if len(first_name) >= 4 and f" {first_name.lower()} " in f" {q_lower} ":
             return e
-    return ""
-
-
-def extract_package(qtext: str) -> str:
-    m = re.search(r"Pkg-\d+|Package\s+\d+", qtext, re.IGNORECASE)
-    if m:
-        val = m.group(0).replace("Package ", "Pkg-")
-        return f"%{val}%"
     return ""
 
 
@@ -159,18 +191,56 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
     emp_name = extract_employee(question, known_employees)
     pkg_pat = extract_package(question)
 
-    # Package to Client Resolution if Client is missing
-    if not client_name and pkg_pat:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT c.client_name FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE p.project_name LIKE ?;", (pkg_pat,))
-        r = c.fetchone()
-        conn.close()
-        if r:
-            client_name = r[0]
+    # 1. Absence / Unreferenced Count
+    if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
+        if client_name and emp_name:
+            return f"""
+            SELECT COUNT(*)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            JOIN employees e ON p.employee_id = e.employee_id
+            LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
+            WHERE c.client_name LIKE '%{client_name}%'
+              AND e.employee_name LIKE '%{emp_name}%'
+              AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
+            """
+        elif client_name:
+            return f"""
+            SELECT COUNT(*)
+            FROM projects p
+            JOIN clients c ON p.client_id = c.client_id
+            LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
+            WHERE c.client_name LIKE '%{client_name}%'
+              AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
+            """
 
-    # 1. Date Span in Days
-    if answer_type == "days" or "days passed" in q_lower or "days elapsed" in q_lower or "interval" in q_lower:
+
+    # 2. Pending / Due Amount
+    if "pending amount" in q_lower or "remaining balance" in q_lower or "due" in q_lower:
+        if client_name:
+            return f"""
+            SELECT fb.due_value
+            FROM financial_billing fb
+            JOIN clients c ON fb.client_id = c.client_id
+            WHERE c.client_name LIKE '%{client_name}%';
+            """
+
+    # 3. Category vs Category Difference
+    if ("versus" in q_lower or "against the" in q_lower or "subtract" in q_lower or "difference between the" in q_lower) and ("scopes" in q_lower or "portfolio" in q_lower or "spend" in q_lower or "totals" in q_lower or "epc" in q_lower):
+        cats = []
+        for cat_name in ["Large Bridges", "Water Treatment", "Irrigation", "Sewerage Drainage", "Expressways", "Roads Highways", "Industrial EPC", "Small Buildings", "Buildings"]:
+            if cat_name.lower() in q_lower or any(w in q_lower for w in cat_name.lower().split()):
+                cats.append(cat_name)
+        if len(cats) >= 2 and client_name:
+            return f"""
+            SELECT ABS(
+                COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.category LIKE '%{cats[0]}%'), 0) -
+                COALESCE((SELECT SUM(contract_value) FROM projects p JOIN clients c ON p.client_id = c.client_id WHERE c.client_name LIKE '%{client_name}%' AND p.category LIKE '%{cats[1]}%'), 0)
+            );
+            """
+
+    # 4. Date Span in Days
+    if answer_type == "days" or "days passed" in q_lower or "days elapsed" in q_lower or "interval" in q_lower or "real elapsed period" in q_lower:
         if pkg_pat:
             return f"""
             SELECT CAST(ROUND(JULIANDAY(p.completion_date) - JULIANDAY(cert.issue_date)) AS INTEGER)
@@ -189,8 +259,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             LIMIT 1;
             """
 
-    # 2. Average Work Size
-    if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower:
+    # 5. Average Work Size
+    if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower or "rupee mean" in q_lower or "mean volume" in q_lower:
         if client_name:
             return f"""
             SELECT CAST(ROUND(AVG(p.contract_value)) AS INTEGER)
@@ -199,7 +269,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 3. Distinct Categories
+    # 6. Distinct Categories
     if "categories" in q_lower or "classifications" in q_lower or "distinct work" in q_lower:
         if emp_name:
             return f"""
@@ -209,20 +279,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE e.employee_name LIKE '%{emp_name}%';
             """
 
-    # 4. Absence / Unreferenced Count
-    if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
-        if client_name:
-            return f"""
-            SELECT COUNT(*)
-            FROM projects p
-            JOIN clients c ON p.client_id = c.client_id
-            LEFT JOIN documents d ON d.project_id = p.project_id AND d.doc_type = 'reference_letter'
-            WHERE c.client_name LIKE '%{client_name}%'
-              AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
-            """
-
-    # 5. Referenced Percentage Share
-    if answer_type == "percent" and ("share" in q_lower or "divided by" in q_lower or "testimonial" in q_lower or "reference letter" in q_lower):
+    # 7. Referenced Percentage Share
+    if answer_type == "percent" and ("share" in q_lower or "divided by" in q_lower or "testimonial" in q_lower or "reference letter" in q_lower or "client approval" in q_lower):
         if client_name:
             return f"""
             SELECT ROUND(
@@ -235,8 +293,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 6. Financial Collection Percentage
-    if answer_type == "percent" and ("collection" in q_lower or "billed" in q_lower or "collected" in q_lower):
+    # 8. Financial Collection Percentage
+    if answer_type == "percent" and ("collection" in q_lower or "billed" in q_lower or "collected" in q_lower or "cleared" in q_lower):
         if client_name:
             return f"""
             SELECT fb.collection_pct
@@ -245,7 +303,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 7. Financial Shortfall / Gap (Awarded - Invoiced)
+    # 9. Financial Shortfall / Gap (Awarded - Invoiced)
     if "shortfall" in q_lower or "gap" in q_lower or "invoiced" in q_lower:
         if client_name:
             return f"""
@@ -256,9 +314,9 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 8. Exclusion Aggregate
-    if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower:
-        m_ex = re.search(r"(?:excluding|exclude|remove)\s+([A-Za-z0-9\s]+?)(?:[,\u2014\–\-]|what|segment|$)", question, re.IGNORECASE)
+    # 10. Exclusion Aggregate
+    if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower or "minus" in q_lower:
+        m_ex = re.search(r"(?:excluding|exclude|remove|minus)\s+(?:the\s+)?([A-Za-z0-9\s]+?)(?:[,\u2014\–\-]|what|side|segment|$)", question, re.IGNORECASE)
         ex_str = m_ex.group(1).strip() if m_ex else ""
         if client_name:
             return f"""
@@ -269,8 +327,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.category NOT LIKE '%{ex_str}%';
             """
 
-    # 9. Target Gap Threshold (Target - Total)
-    if "target" in q_lower or "how much more" in q_lower:
+    # 11. Target Gap Threshold (Target - Total)
+    if "target" in q_lower or "how much more" in q_lower or "need to clear" in q_lower or "bar" in q_lower:
         t_val = text_to_crore_number(question) or 200000000
         if client_name:
             return f"""
@@ -280,7 +338,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 10. Rank Value Difference (1st - 2nd Largest)
+    # 12. Rank Value Difference (1st - 2nd Largest)
     if "largest" in q_lower and ("second" in q_lower or "exceed" in q_lower or "difference" in q_lower):
         if client_name:
             return f"""
@@ -293,9 +351,9 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             SELECT (SELECT contract_value FROM Ranked WHERE rk = 1) - (SELECT contract_value FROM Ranked WHERE rk = 2);
             """
 
-    # 11. Year-over-Year Difference
+    # 13. Year-over-Year Difference
     m_years = re.findall(r"\b(20\d{2})\b", question)
-    if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower):
+    if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower or "vs" in q_lower or "shifted" in q_lower or "variance" in q_lower):
         y1, y2 = int(m_years[0]), int(m_years[1])
         if client_name:
             return f"""
@@ -305,8 +363,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             );
             """
 
-    # 12. Temporal Chain (completed after cert date)
-    if "after that date" in q_lower or "completed after" in q_lower or "wrapped up after" in q_lower:
+    # 14. Temporal Chain (completed after cert date)
+    if "after that date" in q_lower or "completed after" in q_lower or "wrapped up after" in q_lower or "finished after" in q_lower or "reached completion after" in q_lower:
         if emp_name:
             return f"""
             SELECT SUM(p.contract_value)
@@ -318,9 +376,9 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.completion_date > cert.issue_date;
             """
 
-    # 13. Threshold Aggregate
+    # 15. Threshold Aggregate
     threshold_val = text_to_crore_number(question)
-    if threshold_val is not None and ("clear" in q_lower or "crossing" in q_lower or "hitting" in q_lower or "cutoff" in q_lower or "exceed" in q_lower or "mark" in q_lower or "limit" in q_lower):
+    if threshold_val is not None and ("clear" in q_lower or "crossing" in q_lower or "hitting" in q_lower or "cutoff" in q_lower or "exceed" in q_lower or "mark" in q_lower or "limit" in q_lower or "threshold" in q_lower or "bar" in q_lower):
         if client_name:
             return f"""
             SELECT SUM(p.contract_value)
@@ -330,8 +388,8 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.contract_value >= {threshold_val};
             """
 
-    # 14. Combined value for Employee + Client
-    if emp_name and client_name:
+    # 16. Combined value for Employee + Client (only if explicitly asking for works HE/SHE has done)
+    if emp_name and client_name and ("he has done" in q_lower or "she has done" in q_lower or "he led" in q_lower or "she led" in q_lower or "her assignments" in q_lower or "his assignments" in q_lower):
         return f"""
         SELECT SUM(p.contract_value)
         FROM projects p
@@ -341,7 +399,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
           AND e.employee_name LIKE '%{emp_name}%';
         """
 
-    # 15. Default Fallback query per client
+    # 17. Default Fallback query per client
     if client_name:
         return f"""
         SELECT SUM(p.contract_value)
