@@ -94,7 +94,20 @@ def extract_package(qtext: str) -> str:
 
 
 def extract_client(qtext: str, known_clients: List[str]) -> str:
+    q_lower = qtext.lower()
 
+    # 1. Direct match on known database clients (sorted longest first)
+    sorted_clients = sorted(known_clients, key=lambda x: len(x), reverse=True)
+    for c in sorted_clients:
+        if c.lower() in q_lower:
+            return c
+
+    # 2. Alias mapping lookup
+    for kw, target_c in ALIAS_CLIENTS.items():
+        if kw in q_lower:
+            return target_c
+
+    # 3. Package-first resolution if package number is specified
     pkg_pat = extract_package(qtext)
     if pkg_pat:
         conn = sqlite3.connect(DB_PATH)
@@ -105,10 +118,6 @@ def extract_client(qtext: str, known_clients: List[str]) -> str:
         if r:
             return r[0]
 
-    q_lower = qtext.lower()
-    for kw, target_c in ALIAS_CLIENTS.items():
-        if kw in q_lower:
-            return target_c
 
     if "irrigation" in q_lower or "waterways" in q_lower:
         if "west bengal" in q_lower or "bengal" in q_lower:
@@ -191,7 +200,22 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
     emp_name = extract_employee(question, known_employees)
     pkg_pat = extract_package(question)
 
-    # 1. Absence / Unreferenced Count
+    # 1. Combined value for Employee + Client (only for money answer types when asking for specific employee's work for that client)
+    if answer_type == "money" and emp_name and client_name and re.search(r"\b(?:he|she)\s+(?:has\s+)?(?:done|led|delivered|completed|finished)\b|\b(?:her|his)\s+assignments\b", q_lower):
+        return f"""
+        SELECT SUM(p.contract_value)
+        FROM projects p
+        JOIN clients c ON p.client_id = c.client_id
+        JOIN employees e ON p.employee_id = e.employee_id
+        WHERE c.client_name LIKE '%{client_name}%'
+          AND e.employee_name LIKE '%{emp_name}%';
+        """
+
+
+
+
+
+    # 2. Absence / Unreferenced Count
     if ("no " in q_lower or "lack" in q_lower or "without" in q_lower or "missing" in q_lower or "unreferenced" in q_lower) and ("reference" in q_lower or "letter" in q_lower or "testimonial" in q_lower):
         if client_name and emp_name:
             return f"""
@@ -214,8 +238,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND (d.doc_id IS NULL OR d.has_reference_letter = 0);
             """
 
-
-    # 2. Pending / Due Amount
+    # 3. Pending / Due Amount
     if "pending amount" in q_lower or "remaining balance" in q_lower or "due" in q_lower:
         if client_name:
             return f"""
@@ -225,7 +248,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 3. Category vs Category Difference
+    # 4. Category vs Category Difference
     if ("versus" in q_lower or "against the" in q_lower or "subtract" in q_lower or "difference between the" in q_lower) and ("scopes" in q_lower or "portfolio" in q_lower or "spend" in q_lower or "totals" in q_lower or "epc" in q_lower):
         cats = []
         for cat_name in ["Large Bridges", "Water Treatment", "Irrigation", "Sewerage Drainage", "Expressways", "Roads Highways", "Industrial EPC", "Small Buildings", "Buildings"]:
@@ -239,7 +262,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             );
             """
 
-    # 4. Date Span in Days
+    # 5. Date Span in Days
     if answer_type == "days" or "days passed" in q_lower or "days elapsed" in q_lower or "interval" in q_lower or "real elapsed period" in q_lower:
         if pkg_pat:
             return f"""
@@ -259,7 +282,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             LIMIT 1;
             """
 
-    # 5. Average Work Size
+    # 6. Average Work Size
     if "average size" in q_lower or "mean size" in q_lower or "average work" in q_lower or "rupee mean" in q_lower or "mean volume" in q_lower:
         if client_name:
             return f"""
@@ -269,7 +292,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 6. Distinct Categories
+    # 7. Distinct Categories
     if "categories" in q_lower or "classifications" in q_lower or "distinct work" in q_lower:
         if emp_name:
             return f"""
@@ -279,7 +302,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE e.employee_name LIKE '%{emp_name}%';
             """
 
-    # 7. Referenced Percentage Share
+    # 8. Referenced Percentage Share
     if answer_type == "percent" and ("share" in q_lower or "divided by" in q_lower or "testimonial" in q_lower or "reference letter" in q_lower or "client approval" in q_lower):
         if client_name:
             return f"""
@@ -293,7 +316,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 8. Financial Collection Percentage
+    # 9. Financial Collection Percentage
     if answer_type == "percent" and ("collection" in q_lower or "billed" in q_lower or "collected" in q_lower or "cleared" in q_lower):
         if client_name:
             return f"""
@@ -303,7 +326,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 9. Financial Shortfall / Gap (Awarded - Invoiced)
+    # 10. Financial Shortfall / Gap (Awarded - Invoiced)
     if "shortfall" in q_lower or "gap" in q_lower or "invoiced" in q_lower:
         if client_name:
             return f"""
@@ -314,7 +337,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 10. Exclusion Aggregate
+    # 11. Exclusion Aggregate
     if "excluding" in q_lower or "exclude" in q_lower or "remove" in q_lower or "minus" in q_lower:
         m_ex = re.search(r"(?:excluding|exclude|remove|minus)\s+(?:the\s+)?([A-Za-z0-9\s]+?)(?:[,\u2014\–\-]|what|side|segment|$)", question, re.IGNORECASE)
         ex_str = m_ex.group(1).strip() if m_ex else ""
@@ -327,7 +350,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.category NOT LIKE '%{ex_str}%';
             """
 
-    # 11. Target Gap Threshold (Target - Total)
+    # 12. Target Gap Threshold (Target - Total)
     if "target" in q_lower or "how much more" in q_lower or "need to clear" in q_lower or "bar" in q_lower:
         t_val = text_to_crore_number(question) or 200000000
         if client_name:
@@ -338,7 +361,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             WHERE c.client_name LIKE '%{client_name}%';
             """
 
-    # 12. Rank Value Difference (1st - 2nd Largest)
+    # 13. Rank Value Difference (1st - 2nd Largest)
     if "largest" in q_lower and ("second" in q_lower or "exceed" in q_lower or "difference" in q_lower):
         if client_name:
             return f"""
@@ -351,7 +374,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             SELECT (SELECT contract_value FROM Ranked WHERE rk = 1) - (SELECT contract_value FROM Ranked WHERE rk = 2);
             """
 
-    # 13. Year-over-Year Difference
+    # 14. Year-over-Year Difference
     m_years = re.findall(r"\b(20\d{2})\b", question)
     if len(m_years) >= 2 and ("difference" in q_lower or "between" in q_lower or "moved" in q_lower or "vs" in q_lower or "shifted" in q_lower or "variance" in q_lower):
         y1, y2 = int(m_years[0]), int(m_years[1])
@@ -363,7 +386,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
             );
             """
 
-    # 14. Temporal Chain (completed after cert date)
+    # 15. Temporal Chain (completed after cert date)
     if "after that date" in q_lower or "completed after" in q_lower or "wrapped up after" in q_lower or "finished after" in q_lower or "reached completion after" in q_lower:
         if emp_name:
             return f"""
@@ -376,7 +399,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.completion_date > cert.issue_date;
             """
 
-    # 15. Threshold Aggregate
+    # 16. Threshold Aggregate
     threshold_val = text_to_crore_number(question)
     if threshold_val is not None and ("clear" in q_lower or "crossing" in q_lower or "hitting" in q_lower or "cutoff" in q_lower or "exceed" in q_lower or "mark" in q_lower or "limit" in q_lower or "threshold" in q_lower or "bar" in q_lower):
         if client_name:
@@ -388,17 +411,6 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
               AND p.contract_value >= {threshold_val};
             """
 
-    # 16. Combined value for Employee + Client (only if explicitly asking for works HE/SHE has done)
-    if emp_name and client_name and ("he has done" in q_lower or "she has done" in q_lower or "he led" in q_lower or "she led" in q_lower or "her assignments" in q_lower or "his assignments" in q_lower):
-        return f"""
-        SELECT SUM(p.contract_value)
-        FROM projects p
-        JOIN clients c ON p.client_id = c.client_id
-        JOIN employees e ON p.employee_id = e.employee_id
-        WHERE c.client_name LIKE '%{client_name}%'
-          AND e.employee_name LIKE '%{emp_name}%';
-        """
-
     # 17. Default Fallback query per client
     if client_name:
         return f"""
@@ -409,6 +421,7 @@ def generate_sql_rule(question: str, answer_type: str) -> str:
         """
 
     return "SELECT COUNT(*) FROM projects;"
+
 
 
 
