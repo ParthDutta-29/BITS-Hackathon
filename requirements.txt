@@ -2,8 +2,11 @@ pandas
 openpyxl
 pdfplumber
 pypdf
+PyMuPDF
 unstructured
 pydantic
 python-dotenv
+tqdm
+requests
 openai
 google-generativeai

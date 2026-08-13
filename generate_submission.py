@@ -3,24 +3,30 @@ import json
 import csv
 import subprocess
 import sys
+import argparse
 from tqdm import tqdm
 from reasoning_engine import answer_question
 
-QUESTIONS_FILE = "questions.json"
-OUTPUT_CSV = "submission.csv"
-
 
 def main():
-    if not os.path.exists(QUESTIONS_FILE):
-        print(f"Error: {QUESTIONS_FILE} not found.")
+    parser = argparse.ArgumentParser(description="Generate submission CSV from questions JSON")
+    parser.add_argument("--questions", default="questions.json", help="Path to questions json file")
+    parser.add_argument("--out", default="submission.csv", help="Path to output CSV file")
+    args = parser.parse_args()
+
+    questions_file = args.questions
+    output_csv = args.out
+
+    if not os.path.exists(questions_file):
+        print(f"Error: {questions_file} not found.")
         return
 
-    with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
+    with open(questions_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     questions = data.get("questions", [])
     total_q = len(questions)
-    print(f"Loaded {total_q} questions from {QUESTIONS_FILE}.")
+    print(f"Loaded {total_q} questions from {questions_file}.")
 
     submission_rows = []
 
@@ -44,13 +50,13 @@ def main():
 
         submission_rows.append({"question_id": qid, "answer": ans_str})
 
-    print(f"\nWriting {len(submission_rows)} rows to {OUTPUT_CSV}...")
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+    print(f"\nWriting {len(submission_rows)} rows to {output_csv}...")
+    with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["question_id", "answer"])
         writer.writeheader()
         writer.writerows(submission_rows)
 
-    print(f"Successfully generated {OUTPUT_CSV}!")
+    print(f"Successfully generated {output_csv}!")
 
     print("\nRunning evaluate.py self-test verification...")
     res = subprocess.run(

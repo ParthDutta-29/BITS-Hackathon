@@ -479,6 +479,46 @@ def is_valid_result(val: Any, answer_type: str, question: str) -> bool:
     return True
 
 
+def call_vllm_llm(question: str, answer_type: str, client_name: str = "", emp_name: str = "") -> Optional[Any]:
+    llm_url = os.environ.get("LLM_BASE_URL")
+    if not llm_url:
+        return None
+    try:
+        import requests
+        endpoint = f"{llm_url.rstrip('/')}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        prompt = f"Question: {question}\nExpected Answer Type: {answer_type}."
+        if client_name or emp_name:
+            prompt += f"\nContext: Client={client_name}, Employee={emp_name}"
+        prompt += "\nRespond ONLY with the single numeric answer value, no text."
+
+        payload = {
+            "model": "qwen3.6-35b-a3b-nvfp4",
+            "messages": [
+                {"role": "system", "content": "You are a precise database assistant. Calculate and return only the numeric answer."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2048,
+            "temperature": 0.0
+        }
+        res = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+        if res.status_code == 200:
+            data = res.json()
+            choice = data.get("choices", [{}])[0]
+            msg = choice.get("message", {})
+            content = msg.get("content") or msg.get("reasoning")
+            if content:
+                m = re.search(r"[-+]?\d*\.\d+|\d+", content)
+                if m:
+                    val_str = m.group(0)
+                    if answer_type == "percent":
+                        return f"{float(val_str):.2f}"
+                    return int(round(float(val_str)))
+    except Exception as e:
+        print(f"VLLM API call notice: {e}")
+    return None
+
+
 def answer_question(question: str, answer_type: str) -> Tuple[Any, str]:
     q_lower = question.lower()
     known_clients, known_employees = get_db_entities()
@@ -644,6 +684,11 @@ def answer_question(question: str, answer_type: str) -> Tuple[Any, str]:
                 return int(r[0]), "LAYER2_FALLBACK_COUNT"
 
     conn.close()
+
+    # Layer 2.5: Platform VLLM Query Fallback if LLM_BASE_URL is exported
+    vllm_res = call_vllm_llm(question, answer_type, client_name, emp_name)
+    if vllm_res is not None:
+        return vllm_res, "VLLM_LLM_ENDPOINT"
 
     # Layer 3: Domain-Calibrated Safeguard Baseline
     if answer_type == "money":

@@ -3,8 +3,9 @@ import json
 import sqlite3
 import re
 import glob
+import argparse
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import pymupdf
 
 DB_FILE = "construction_archive.db"
@@ -60,7 +61,32 @@ def init_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def build_database():
+def find_matching_files(docs_dir: str, subfolder_name: str, ext: str = ".pdf") -> List[str]:
+    matches = []
+    for root, dirs, files in os.walk(docs_dir):
+        rel = os.path.relpath(root, docs_dir).replace("\\", "/")
+        if subfolder_name.lower() in rel.lower() or subfolder_name.lower() in root.lower():
+            for f in files:
+                if f.endswith(ext):
+                    matches.append(os.path.join(root, f))
+    if not matches:
+        for root, dirs, files in os.walk(docs_dir):
+            for f in files:
+                if subfolder_name.lower() in f.lower() and f.endswith(ext):
+                    matches.append(os.path.join(root, f))
+    return sorted(matches)
+
+
+def find_ageing_file(docs_dir: str) -> Optional[str]:
+    for root, dirs, files in os.walk(docs_dir):
+        for f in files:
+            if "ageing" in f.lower() and f.endswith(".xlsx"):
+                return os.path.join(root, f)
+    default_path = os.path.join(docs_dir, "workbooks", "Receivables_Ageing.xlsx")
+    return default_path if os.path.exists(default_path) else None
+
+
+def build_database(docs_dir: str = "documents"):
     if not os.path.exists(EXTRACTED_FILE):
         print(f"Error: {EXTRACTED_FILE} not found. Please run extract_entities.py first.")
         return
@@ -100,8 +126,8 @@ def build_database():
             employees_map[e_clean] = cursor.lastrowid
         return employees_map[e_clean]
 
-    # 1. Parse all 155 company completion certificates for authoritative 155 projects
-    ccc_files = sorted(glob.glob("documents/company_completion_certificate/*.pdf"))
+    # 1. Parse all company completion certificates for authoritative projects
+    ccc_files = find_matching_files(docs_dir, "company_completion_certificate", ".pdf")
     projects_pkg_map = {}
 
     for f in ccc_files:
@@ -183,7 +209,7 @@ def build_database():
 
     # 3. Map Reference Letters & Documents
     ref_pkg_nums = set()
-    ref_files = sorted(glob.glob("documents/reference_letter/*.pdf"))
+    ref_files = find_matching_files(docs_dir, "reference_letter", ".pdf")
     for f in ref_files:
         d = pymupdf.open(f)
         txt = "\n".join([p.get_text() for p in d])
@@ -215,8 +241,8 @@ def build_database():
         doc_count += 1
 
     # 4. Populate financial_billing from Receivables_Ageing.xlsx
-    ageing_file = "documents/workbooks/Receivables_Ageing.xlsx"
-    if os.path.exists(ageing_file):
+    ageing_file = find_ageing_file(docs_dir)
+    if ageing_file and os.path.exists(ageing_file):
         try:
             df_age = pd.read_excel(ageing_file, sheet_name="AR Ageing")
             for client_raw, grp in df_age.groupby("Client"):
@@ -251,6 +277,10 @@ def build_database():
 
 
 if __name__ == "__main__":
-    build_database()
+    parser = argparse.ArgumentParser(description="Build SQLite database from extracted entities")
+    parser.add_argument("--docs", default="documents", help="Path to documents directory")
+    args = parser.parse_args()
+
+    build_database(args.docs)
 
 
